@@ -1,0 +1,36 @@
+# 本仓库仅跟踪「超群小帮手」相关源码（wa_multi_listener + tg_multi_listener）
+/*
+!.gitignore
+!README.md
+!wa_multi_listener/
+!wa_multi_listener/**
+!tg_multi_listener/
+!tg_multi_listener/**
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+
+# 敏感配置与用户数据（勿提交）
+**/config.json
+**/sessions/
+**/*.session
+**/*.db
+**/data/
+**/logs/
+**/userdata_preserve/
+
+# 打包与备份
+**/dist/
+**/build/
+**/backup/
+**/backups/
+**/*.bak
+**/*.bak_*
+
+# IDE / 本地
+.cursor/
+.qoder/
+**/.cursor/

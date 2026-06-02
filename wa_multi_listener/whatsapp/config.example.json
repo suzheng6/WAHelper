@@ -1,0 +1,15 @@
+{
+  "accounts": [
+    {
+      "id": "main",
+      "session_name": "main",
+      "enabled": true,
+      "phone": "",
+      "proxy": ""
+    }
+  ],
+  "watch_rules": {},
+  "address_book": [],
+  "rate_limit_seconds": 10,
+  "listening_enabled": true
+}

@@ -1,0 +1,9 @@
+{
+  "api_id": 0,
+  "api_hash": "",
+  "accounts": [],
+  "address_book": [],
+  "watch_rules": {},
+  "rate_limit_seconds": 10,
+  "listening_enabled": true
+}

@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+sessions/*.session
+config.json
+data/
+logs/*.log
+
+# PyInstaller
+build/
+dist/
+
+# 从 dist 拷出的本地联调目录（含 session，勿提交）
+test_from_dist/
+

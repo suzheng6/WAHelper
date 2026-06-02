@@ -1,0 +1,2 @@
+# 仅在制作 Windows  exe 时使用：pip install -r requirements-build.txt
+pyinstaller>=6.0,<8

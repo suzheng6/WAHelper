@@ -1,0 +1,36 @@
+================================================================================
+ 超群小帮手 · WhatsApp + Telegram 整合版
+================================================================================
+
+【结构】
+  - 顶层两个标签：WhatsApp | Telegram
+  - 界面与操作以 WhatsApp 版为主框架
+  - 数据分目录存放，互不覆盖：
+      whatsapp/   — WA 的 config.json、sessions/*.db、data/
+      telegram/   — TG 的 config.json、sessions/*.session、data/
+
+【新用户（无旧版数据）】
+  1. 打开 Telegram 标签
+  2. 在「账号管理」填写 api_id / api_hash（全体账号共用）
+  3. 添加账号并登录（与独立 TG 助手相同）
+  首次运行会自动在 telegram/ 下生成空白 config.json，无需先导入。
+
+【从旧版 TG 助手导入（可选）】
+  1. 点击右上角「导入 TG 登录与配置…」
+  2. 在对话框中任选文件夹（程序会自动查找其中的 config.json）
+     可选：旧助手根目录、dist 目录、或含 telegram/ 子目录的文件夹
+  3. 仅导入：config.json（含账号、通讯录、api 配置）与 sessions/*.session 登录文件
+     不导入：定时任务 data/、日志 logs/ 等其它文件
+
+【首次升级（原 WA 独立版）】
+  若 exe 旁已有 config.json / sessions，首次启动会自动迁入 whatsapp/ 子目录。
+
+【功能】
+  - WhatsApp 标签：登录（扫码）、监听、定时任务（含主号按群自动、TXT 间隔）
+  - Telegram 标签：登录、监听、定时任务（与原 TG 助手一致）
+
+【独立运行（可选）】
+  - 仅 WA：仍可用 wa_multi_listener 目录单独运行（数据在 whatsapp/）
+  - 仅 TG：在 tg_multi_listener 目录运行其 main.py（数据在 telegram/ 或 exe 旁）
+
+================================================================================

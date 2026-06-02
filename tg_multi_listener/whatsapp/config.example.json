@@ -1,0 +1,16 @@
+{
+  "api_id": 12345678,
+  "api_hash": "替换为你的 api_hash（全体账号共用这一套）",
+  "accounts": [
+    {
+      "id": "main",
+      "session_name": "main",
+      "enabled": true,
+      "phone": ""
+    }
+  ],
+  "watch_rules": {},
+  "address_book": [],
+  "rate_limit_seconds": 10,
+  "listening_enabled": true
+}
