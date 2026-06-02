@@ -17,8 +17,8 @@ from neonize.aioze.events import ConnectedEv, ConnectFailureEv, LoggedOutEv
 from neonize.proto.waCompanionReg.WAWebProtobufsCompanionReg_pb2 import DeviceProps
 from wa_proxy import apply_proxy, clear_proxy
 
-_CONNECT_TIMEOUT_DIRECT = 75.0
-_CONNECT_TIMEOUT_PROXY = 120.0
+_CONNECT_TIMEOUT_DIRECT = 30.0
+_CONNECT_TIMEOUT_PROXY = 30.0
 
 _CONNECT_FAIL_ZH = {
     1: "连接失败（一般错误）",

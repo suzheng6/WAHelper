@@ -35,7 +35,7 @@ from wa_client import establish_connection, new_client, stop_all_clients
 
 _STAGGER_SEC = 1.2
 
-_MAX_CONNECT_ATTEMPTS = 2
+_MAX_CONNECT_ATTEMPTS = 1
 
 
 
