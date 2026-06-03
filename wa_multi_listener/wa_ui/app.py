@@ -51,7 +51,13 @@ from schedule2_runner import (
 from session_check import has_saved_session
 from wa_ui.qr_dialog import QrLoginDialog
 from wa_ui.card_grid import TASKMGR_COLS, configure_equal_columns, grid_place
-from wa_ui.taskmgr_tile_theme import taskmgr_card_status_text, taskmgr_fonts, taskmgr_tile_palette
+from wa_ui.taskmgr_tile_theme import (
+    format_taskmgr_count_summary,
+    taskmgr_card_status_text,
+    taskmgr_count_jobs,
+    taskmgr_fonts,
+    taskmgr_tile_palette,
+)
 from wa_ui.log_textbox_util import (
     DASH_LOG_MAX_LINES,
     LOG_PUMP_MS,
@@ -1082,7 +1088,15 @@ class WaPanel(ctk.CTkFrame):
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", pady=(0, 6))
+        self._taskmgr_count_lbl = ctk.CTkLabel(
+            inner,
+            text="任务数量：0",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text"],
+            anchor="w",
+        )
+        self._taskmgr_count_lbl.pack(anchor="w", pady=(0, 10))
         top = ctk.CTkFrame(inner, fg_color="transparent")
         top.pack(fill="x", pady=(0, 8))
         ctk.CTkButton(
@@ -1298,6 +1312,14 @@ class WaPanel(ctk.CTkFrame):
             return
         self._taskmgr_fp_cache[job_id] = self._taskmgr_fingerprint(j, self._cfg)
         self._apply_taskmgr_tile(w, j, self._cfg)
+        self._update_taskmgr_count_label(jobs)
+
+    def _update_taskmgr_count_label(self, jobs: List[Schedule2Job]) -> None:
+        lbl = getattr(self, "_taskmgr_count_lbl", None)
+        if lbl is None:
+            return
+        counts = taskmgr_count_jobs(jobs, is_running=schedule2_job_is_running)
+        lbl.configure(text=format_taskmgr_count_summary(counts))
 
     def _render_taskmgr_cards(self, *, force: bool = False) -> None:
         if not hasattr(self, "_taskmgr_cards"):
@@ -1318,6 +1340,7 @@ class WaPanel(ctk.CTkFrame):
                     text="尚无定时任务，请先在「定时任务」页添加。",
                     text_color=COLORS["muted"],
                 ).grid(row=0, column=0, columnspan=TASKMGR_COLS, sticky="w", padx=8, pady=12)
+            self._update_taskmgr_count_label(jobs)
             self._sync_s2_job_pick_combo()
             return
         if force or ids != self._taskmgr_listed_ids:
@@ -1325,6 +1348,7 @@ class WaPanel(ctk.CTkFrame):
             self._full_rebuild_taskmgr_grid(jobs, cfg)
         else:
             self._patch_taskmgr_grid(jobs, cfg)
+        self._update_taskmgr_count_label(jobs)
         self._sync_s2_job_pick_combo()
         handler = getattr(self, "_taskmgr_scroll_handler", None)
         if handler:

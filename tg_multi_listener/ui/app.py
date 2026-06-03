@@ -12,7 +12,13 @@ _wa_pkg = _pkg_root.parent / "wa_multi_listener"
 if _wa_pkg.is_dir() and str(_wa_pkg) not in sys.path:
     sys.path.insert(0, str(_wa_pkg))
 from wa_ui.card_grid import TASKMGR_COLS, TG_ACCT_COLS, configure_equal_columns, grid_place
-from wa_ui.taskmgr_tile_theme import taskmgr_card_status_text, taskmgr_fonts, taskmgr_tile_palette
+from wa_ui.taskmgr_tile_theme import (
+    format_taskmgr_count_summary,
+    taskmgr_card_status_text,
+    taskmgr_count_jobs,
+    taskmgr_fonts,
+    taskmgr_tile_palette,
+)
 from wa_ui.log_textbox_util import (
     DASH_LOG_MAX_LINES,
     LOG_PUMP_MS,
@@ -1177,7 +1183,23 @@ class MainWindow(ctk.CTkFrame):
         except IndexError:
             return
         self._login_status.pop(dead.id, None)
+        for ent in self._cfg.address_book:
+            if ent.owner_account_id == dead.id:
+                ent.owner_account_id = ""
+        self._optional_merge_global_api_from_ui()
+        save_config(self._cfg)
         self._render_account_rows()
+        self._refresh_owner_account_combos()
+        self._refresh_schedule_combo()
+        info(f"已删除账号「{dead.id}」并已保存到配置。")
+        if self._coord is not None and self._coord.has_connected_clients():
+            def after_reload() -> None:
+                self._render_account_rows()
+                self._refresh_owner_account_combos()
+                self._refresh_dashboard()
+                self._schedule_login_probe()
+
+            self._invoke_restart_in_background(after_reload)
 
     # --- 通讯录（群 + 用户，一处保存后监听/定时任务里选用） ---
     def _page_groups(self) -> ctk.CTkFrame:
@@ -1735,7 +1757,15 @@ class MainWindow(ctk.CTkFrame):
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", pady=(0, 6))
+        self._taskmgr_count_lbl = ctk.CTkLabel(
+            wrap,
+            text="任务数量：0",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLORS["text"],
+            anchor="w",
+        )
+        self._taskmgr_count_lbl.pack(anchor="w", pady=(0, 10))
         ctk.CTkButton(
             wrap,
             text="一键开始全部任务",
@@ -1982,6 +2012,14 @@ class MainWindow(ctk.CTkFrame):
             return
         self._taskmgr_fp_cache[job_id] = self._taskmgr_fingerprint(j)
         self._apply_taskmgr_tile(w, j)
+        self._update_taskmgr_count_label(jobs)
+
+    def _update_taskmgr_count_label(self, jobs: List[ScheduledJob]) -> None:
+        lbl = getattr(self, "_taskmgr_count_lbl", None)
+        if lbl is None:
+            return
+        counts = taskmgr_count_jobs(jobs, is_running=self._doc_job_is_running)
+        lbl.configure(text=format_taskmgr_count_summary(counts))
 
     def _refresh_job_run_ui(self, job_id: str) -> None:
         """任务卡片 + 定时任务页控件同步刷新（暂停/继续后）。"""
@@ -2015,6 +2053,7 @@ class MainWindow(ctk.CTkFrame):
                     text="尚无文档任务，请先在「定时任务」页添加。",
                     text_color=COLORS["muted"],
                 ).grid(row=0, column=0, columnspan=TASKMGR_COLS, sticky="w", padx=8, pady=12)
+            self._update_taskmgr_count_label(jobs)
             self._sync_sched_job_pick_combo()
             return
         if force or ids != self._taskmgr_listed_ids:
@@ -2022,6 +2061,7 @@ class MainWindow(ctk.CTkFrame):
             self._full_rebuild_taskmgr_grid(jobs)
         else:
             self._patch_taskmgr_grid(jobs)
+        self._update_taskmgr_count_label(jobs)
         self._sync_sched_job_pick_combo()
         handler = getattr(self, "_scroll_wheel_handler", None)
         if handler:
