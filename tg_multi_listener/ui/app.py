@@ -83,6 +83,7 @@ from ..session_check import is_session_authorized_sync
 from ..stats import record_alert, today_alert_count
 from ..telethon_auth import run_login_in_thread
 from ..telethon_coordinator import DEFAULT_JOIN_TIMEOUT, TelethonCoordinator
+from .address_edit_dialog import AddressEditDialog
 from .theme import COLORS, SIDEBAR_WIDTH
 
 # 固定窗口比例 16:10：禁止拖拽边缘改尺寸；略增高以减少纵向遮挡。
@@ -128,8 +129,12 @@ class MainWindow(ctk.CTkFrame):
         self._sched_target_rows: List[Tuple[AddressEntry, ctk.BooleanVar]] = []
         self._grp_row_widgets: Dict[str, Dict[str, Any]] = {}
         self._grp_row_ids: List[str] = []
+        self._grp_row_fp_cache: Dict[str, tuple] = {}
         self._grp_scroll_bound = False
-        self._grp_listen_save_after: Optional[str] = None
+        self._sched_targets_dirty = False
+        self._address_edit_dlg: Optional[AddressEditDialog] = None
+        self._grp_title_font: Optional[ctk.CTkFont] = None
+        self._grp_summary_font: Optional[ctk.CTkFont] = None
         self._acc_widgets: Dict[str, Dict[str, Any]] = {}
         self._acc_listed_ids: List[str] = []
         self._log_ui_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
@@ -294,57 +299,37 @@ class MainWindow(ctk.CTkFrame):
             self._addr_owner.set("—")
 
     def _after_address_book_order_changed(self) -> None:
-        self._render_group_rows(force=True)
-        if getattr(self, "_sched_targets", None) is not None:
-            self._refresh_schedule_target_checks()
+        self._patch_group_rows()
+        self._mark_schedule_targets_dirty()
 
-    def _move_address_book_entry(self, idx: int, delta: int) -> None:
+    def _move_address_book_entry(self, entry_id: str, delta: int) -> None:
         book = self._cfg.address_book
+        idx = next((i for i, e in enumerate(book) if e.id == entry_id), -1)
+        if idx < 0:
+            return
         j = idx + delta
-        if idx < 0 or idx >= len(book) or j < 0 or j >= len(book):
+        if j < 0 or j >= len(book):
             return
         book[idx], book[j] = book[j], book[idx]
         self._optional_merge_global_api_from_ui()
         save_config(self._cfg)
         self._after_address_book_order_changed()
 
-    def _persist_address_remark(self, idx: int, remark: str) -> None:
-        text = (remark or "").strip()
-        if not text:
-            info("备注不能为空。")
-            return
-        if idx < 0 or idx >= len(self._cfg.address_book):
-            return
-        ent = self._cfg.address_book[idx]
-        if ent.remark == text:
-            return
-        ent.remark = text
-        self._optional_merge_global_api_from_ui()
-        save_config(self._cfg)
-        if getattr(self, "_sched_targets", None) is not None:
-            self._refresh_schedule_target_checks()
-        w = self._grp_row_widgets.get(ent.id)
-        if w:
-            w["title"].configure(text=f"{idx + 1}. {text}")
-        else:
-            self._render_group_rows(force=True)
-        info(f"备注已更新：{text}")
+    def _mark_schedule_targets_dirty(self) -> None:
+        self._sched_targets_dirty = True
 
-    def _persist_address_owner(self, idx: int, owner_id: str) -> None:
-        """通讯录归属账号变更后立即写入 config.json。"""
-        val = (owner_id or "").strip()
-        if not val or val in ("—", "请选择"):
+    def _refresh_schedule_targets_if_dirty(self) -> None:
+        if not getattr(self, "_sched_targets_dirty", False):
             return
-        if idx < 0 or idx >= len(self._cfg.address_book):
-            return
-        ent = self._cfg.address_book[idx]
-        if ent.owner_account_id == val:
-            return
-        ent.owner_account_id = val
-        self._optional_merge_global_api_from_ui()
-        save_config(self._cfg)
+        self._sched_targets_dirty = False
         self._refresh_schedule_target_checks()
-        self._patch_group_rows()
+
+    def _grp_list_fonts(self) -> tuple[ctk.CTkFont, ctk.CTkFont]:
+        if self._grp_title_font is None:
+            family = "Microsoft YaHei UI"
+            self._grp_title_font = ctk.CTkFont(family=family, size=14, weight="bold")
+            self._grp_summary_font = ctk.CTkFont(family=family, size=12)
+        return self._grp_title_font, self._grp_summary_font
 
     def _mount_main_scroll(
         self, page: ctk.CTkFrame, footer: Optional[ctk.CTkFrame] = None
@@ -683,7 +668,7 @@ class MainWindow(ctk.CTkFrame):
             self._refresh_owner_account_combos()
             self._patch_group_rows()
         elif nav_id == "sched":
-            self._refresh_schedule_target_checks()
+            self._refresh_schedule_targets_if_dirty()
         elif nav_id == "taskmgr":
             self._render_taskmgr_cards()
         elif nav_id == "logs":
@@ -1217,9 +1202,9 @@ class MainWindow(ctk.CTkFrame):
         )
         intro_grp = ctk.CTkLabel(
             wrap,
-            text="填写「备注、群、监听用户」后点「添加到通讯录」或本页「保存通讯录」写入 config.json。"
-            "修改监听参与状态也会自动保存。每条可用 ↑↓ 调整顺序，定时任务页群发目标顺序与此一致。"
-            "若要让 Telegram 监听立刻按新通讯录生效，请在侧栏再点「保存并重载服务」。",
+            text="填写「备注、群、监听用户」后点「添加到通讯录」写入 config.json。"
+            "列表为只读摘要，点「编辑」修改详情；↑↓ 调整顺序。定时任务页群发目标顺序与此一致。"
+            "若要让 Telegram 监听立刻按新通讯录生效，请在侧栏点「保存并重载服务」。",
             text_color=COLORS["muted"],
             wraplength=520,
             justify="left",
@@ -1281,14 +1266,13 @@ class MainWindow(ctk.CTkFrame):
         """保存通讯录；在线时解析群/用户并刷新监听，无需整程序重启。"""
         self._optional_merge_global_api_from_ui()
         save_config(self._cfg)
-        self._render_group_rows(force=True)
-        self._refresh_schedule_target_checks()
+        self._render_group_rows()
+        self._mark_schedule_targets_dirty()
         if not resolve_online:
             info("通讯录已保存到配置文件。")
             return
         if self._coord is not None and self._coord.has_connected_clients():
             self._coord.apply_config_hot(self._cfg)
-            self.after(800, self._patch_group_rows)
         else:
             info("通讯录已保存；账号在线后将自动解析群标识，或请点「保存并重载服务」。")
 
@@ -1304,36 +1288,23 @@ class MainWindow(ctk.CTkFrame):
     def _address_book_ids(self) -> List[str]:
         return [e.id for e in self._cfg.address_book]
 
-    def _schedule_listen_config_save(self) -> None:
-        aid = getattr(self, "_grp_listen_save_after", None)
-        if aid:
-            try:
-                self.after_cancel(aid)
-            except Exception:
-                pass
-        self._grp_listen_save_after = self.after(400, self._flush_listen_config_save)
-
-    def _flush_listen_config_save(self) -> None:
-        self._grp_listen_save_after = None
-        self._optional_merge_global_api_from_ui()
-        save_config(self._cfg)
-        self._patch_group_rows()
+    def _group_row_fingerprint(self, i: int, ent: AddressEntry, n_book: int) -> tuple:
+        return (
+            i,
+            ent.remark,
+            ent.chat_ref,
+            ent.watch_user,
+            ent.listen_enabled,
+            ent.owner_account_id,
+            i > 0,
+            i < n_book - 1,
+        )
 
     def _patch_group_row_widget(self, i: int, ent: AddressEntry, w: Dict[str, Any], n_book: int) -> None:
         w["title"].configure(text=f"{i + 1}. {ent.remark.strip() or ent.id}")
         w["summary"].configure(text=self._group_row_summary(ent))
         w["up_btn"].configure(state="normal" if i > 0 else "disabled")
         w["down_btn"].configure(state="normal" if i < n_book - 1 else "disabled")
-        acc_vals: List[str] = w.get("_acc_vals") or []
-        cur_own = (ent.owner_account_id or "").strip()
-        if cur_own and cur_own in acc_vals:
-            w["own_combo"].set(cur_own)
-        else:
-            w["own_combo"].set("请选择")
-        try:
-            w["listen_var"].set(bool(ent.listen_enabled))
-        except Exception:
-            pass
 
     def _patch_group_rows(self) -> None:
         if not getattr(self, "_grp_rows", None):
@@ -1344,6 +1315,10 @@ class MainWindow(ctk.CTkFrame):
             return
         n = len(ids)
         for i, ent in enumerate(self._cfg.address_book):
+            fp = self._group_row_fingerprint(i, ent, n)
+            if self._grp_row_fp_cache.get(ent.id) == fp:
+                continue
+            self._grp_row_fp_cache[ent.id] = fp
             w = self._grp_row_widgets.get(ent.id)
             if w:
                 self._patch_group_row_widget(i, ent, w, n)
@@ -1352,134 +1327,137 @@ class MainWindow(ctk.CTkFrame):
         if not getattr(self, "_grp_rows", None):
             return
         ids = self._address_book_ids()
+        if not ids:
+            if self._grp_row_ids:
+                for ch in self._grp_rows.winfo_children():
+                    ch.destroy()
+                self._grp_row_widgets.clear()
+                self._grp_row_fp_cache.clear()
+                self._grp_row_ids = []
+            if not self._grp_rows.winfo_children():
+                ctk.CTkLabel(
+                    self._grp_rows,
+                    text="尚无通讯录条目，请在下方表单添加。",
+                    text_color=COLORS["muted"],
+                ).pack(anchor="w", padx=4, pady=8)
+            return
         if not force and ids == self._grp_row_ids and len(self._grp_row_widgets) == len(ids):
             self._patch_group_rows()
             return
         for ch in self._grp_rows.winfo_children():
             ch.destroy()
         self._grp_row_widgets.clear()
+        self._grp_row_fp_cache.clear()
         self._grp_row_ids = list(ids)
-        acc_vals = self._owner_account_values()
-        owner_vals = (["请选择"] + acc_vals) if acc_vals else ["请选择"]
+        title_font, summary_font = self._grp_list_fonts()
         n_book = len(self._cfg.address_book)
         for i, ent in enumerate(self._cfg.address_book):
-            row = ctk.CTkFrame(self._grp_rows, fg_color=COLORS["card"], corner_radius=10, border_width=1, border_color=COLORS["border"])
-            row.pack(fill="x", pady=4)
+            row = ctk.CTkFrame(
+                self._grp_rows,
+                fg_color=COLORS["card"],
+                corner_radius=10,
+                border_width=1,
+                border_color=COLORS["border"],
+            )
+            row.pack(fill="x", pady=3)
             head = ctk.CTkFrame(row, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(8, 0))
             title_lb = ctk.CTkLabel(
                 head,
                 text=f"{i + 1}. {ent.remark.strip() or ent.id}",
-                font=ctk.CTkFont(size=14, weight="bold"),
+                font=title_font,
                 text_color=COLORS["text"],
+                anchor="w",
             )
-            title_lb.pack(side="left")
+            title_lb.pack(side="left", fill="x", expand=True)
             order_btns = ctk.CTkFrame(head, fg_color="transparent")
             order_btns.pack(side="right")
+            eid = ent.id
             up_btn = ctk.CTkButton(
                 order_btns,
                 text="↑",
-                width=36,
-                height=28,
+                width=32,
+                height=26,
                 fg_color=COLORS["border"],
                 state="normal" if i > 0 else "disabled",
-                command=lambda idx=i: self._move_address_book_entry(idx, -1),
+                command=lambda e=eid: self._move_address_book_entry(e, -1),
             )
             up_btn.pack(side="left", padx=(0, 4))
             down_btn = ctk.CTkButton(
                 order_btns,
                 text="↓",
-                width=36,
-                height=28,
+                width=32,
+                height=26,
                 fg_color=COLORS["border"],
                 state="normal" if i < n_book - 1 else "disabled",
-                command=lambda idx=i: self._move_address_book_entry(idx, 1),
+                command=lambda e=eid: self._move_address_book_entry(e, 1),
             )
-            down_btn.pack(side="left")
+            down_btn.pack(side="left", padx=(0, 4))
+            ctk.CTkButton(
+                order_btns,
+                text="编辑",
+                width=52,
+                height=26,
+                fg_color=COLORS["accent"],
+                hover_color="#3d7ae6",
+                command=lambda e=eid: self._open_address_edit_dialog(e),
+            ).pack(side="left")
             summary_lb = ctk.CTkLabel(
                 row,
                 text=self._group_row_summary(ent),
-                text_color=COLORS["text"],
+                font=summary_font,
+                text_color=COLORS["muted"],
                 justify="left",
+                anchor="w",
                 wraplength=640,
             )
-            summary_lb.pack(anchor="w", padx=12, pady=(10, 4))
-            ctrl = ctk.CTkFrame(row, fg_color="transparent")
-            ctrl.pack(fill="x", padx=12, pady=(0, 10))
-            remark_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-            remark_row.pack(fill="x", pady=(0, 6))
-            ctk.CTkLabel(remark_row, text="备注", text_color=COLORS["muted"]).pack(side="left", padx=(0, 8))
-            remark_entry = ctk.CTkEntry(remark_row, width=220)
-            remark_entry.insert(0, ent.remark or "")
-            remark_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
-
-            def make_remark_save(idx: int, entry: ctk.CTkEntry):
-                def _save() -> None:
-                    self._persist_address_remark(idx, entry.get())
-
-                return _save
-
-            ctk.CTkButton(
-                remark_row,
-                text="保存备注",
-                width=88,
-                fg_color=COLORS["border"],
-                command=make_remark_save(i, remark_entry),
-            ).pack(side="left")
-
-            listen_var = ctk.BooleanVar(value=ent.listen_enabled)
-
-            def make_listen_toggle(idx: int, var: ctk.BooleanVar):
-                def on_change(*_a: object) -> None:
-                    if idx < len(self._cfg.address_book):
-                        self._cfg.address_book[idx].listen_enabled = bool(var.get())
-                    self._schedule_listen_config_save()
-
-                return on_change
-
-            ctk.CTkCheckBox(
-                ctrl,
-                text="参与监听",
-                variable=listen_var,
-                command=make_listen_toggle(i, listen_var),
-                text_color=COLORS["muted"],
-                width=100,
-            ).pack(anchor="w")
-            own_row = ctk.CTkFrame(ctrl, fg_color="transparent")
-            own_row.pack(fill="x", pady=(6, 0))
-            ctk.CTkLabel(own_row, text="归属账号", text_color=COLORS["muted"]).pack(side="left", padx=(0, 8))
-
-            def make_owner_change(idx: int):
-                def on_pick(choice: str) -> None:
-                    self._persist_address_owner(idx, choice)
-
-                return on_pick
-
-            own_combo = ctk.CTkComboBox(own_row, width=140, values=owner_vals, command=make_owner_change(i))
-            cur_own = (ent.owner_account_id or "").strip()
-            if cur_own and cur_own in acc_vals:
-                own_combo.set(cur_own)
-            else:
-                own_combo.set("请选择")
-            own_combo.pack(side="left")
-            ctk.CTkButton(ctrl, text="删除", fg_color=COLORS["border"], command=lambda eid=ent.id: self._del_address_entry(eid)).pack(
-                fill="x", pady=(8, 0)
-            )
+            summary_lb.pack(anchor="w", padx=12, pady=(6, 10))
             self._grp_row_widgets[ent.id] = {
                 "row": row,
                 "title": title_lb,
                 "summary": summary_lb,
                 "up_btn": up_btn,
                 "down_btn": down_btn,
-                "listen_var": listen_var,
-                "own_combo": own_combo,
-                "_acc_vals": acc_vals,
             }
+            self._grp_row_fp_cache[ent.id] = self._group_row_fingerprint(i, ent, n_book)
         if not self._grp_scroll_bound:
             self._grp_scroll_bound = True
             handler = getattr(self, "_scroll_wheel_handler", None)
             if handler:
                 bind_scroll_tree_once(self._grp_rows, handler)
+
+    def _apply_address_entry_update(self, updated: AddressEntry) -> None:
+        for i, ent in enumerate(self._cfg.address_book):
+            if ent.id == updated.id:
+                self._cfg.address_book[i] = updated
+                break
+        else:
+            return
+        self._optional_merge_global_api_from_ui()
+        save_config(self._cfg)
+        self._patch_group_rows()
+        self._mark_schedule_targets_dirty()
+        info(f"已更新通讯录：{updated.remark}")
+        if self._coord is not None and self._coord.has_connected_clients():
+            self._coord.apply_config_hot(self._cfg)
+
+    def _open_address_edit_dialog(self, entry_id: str) -> None:
+        ent = next((e for e in self._cfg.address_book if e.id == entry_id), None)
+        if ent is None:
+            return
+        try:
+            if self._address_edit_dlg is not None and self._address_edit_dlg.winfo_exists():
+                self._address_edit_dlg.focus()
+                return
+        except Exception:
+            pass
+        self._address_edit_dlg = AddressEditDialog(
+            self.winfo_toplevel(),
+            entry=ent,
+            owner_values=self._owner_account_values(),
+            on_save=self._apply_address_entry_update,
+            on_delete=lambda eid=entry_id: self._del_address_entry(eid),
+        )
 
     def _add_address_entry(self) -> None:
         remark = self._addr_remark.get().strip()
