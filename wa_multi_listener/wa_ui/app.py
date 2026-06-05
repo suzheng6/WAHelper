@@ -59,14 +59,21 @@ from wa_ui.taskmgr_tile_theme import (
     taskmgr_tile_palette,
 )
 from wa_ui.log_textbox_util import (
-    DASH_LOG_MAX_LINES,
+    LOG_PUMP_IDLE_MS,
     LOG_PUMP_MS,
     LOG_TEXTBOX_MAX_LINES,
     append_log_line_capped,
     bind_log_textbox_wheel,
     reload_log_textbox_from_memory,
 )
-from wa_ui.scroll_util import bind_scroll_tree_once, mount_page_scroll, scroll_wheel
+from wa_ui.file_picker_util import txt_open_initial_dir
+from wa_ui.scroll_util import (
+    ADDRESS_LIST_HEIGHT,
+    bind_scroll_tree_once,
+    mount_bounded_list_scroll,
+    mount_page_scroll,
+    scroll_wheel,
+)
 
 TASKMGR_TICK_MS = 5000
 
@@ -98,6 +105,7 @@ class WaPanel(ctk.CTkFrame):
         self._schedule2.set_reminder_callback(self._schedule2_reminder)
         self._log_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._log_pump_on = True
+        self._current_nav: str = "dash"
         self._login_dlg: Optional[QrLoginDialog] = None
         self._login_cancel: Optional[threading.Event] = None
         self._login_busy = False
@@ -175,6 +183,7 @@ class WaPanel(ctk.CTkFrame):
         self._content.grid_columnconfigure(0, weight=1)
 
     def _show_nav(self, nav_id: str) -> None:
+        self._current_nav = nav_id
         for k, f in self._nav.items():
             if k == nav_id:
                 f.tkraise()
@@ -194,6 +203,7 @@ class WaPanel(ctk.CTkFrame):
             self._render_taskmgr_cards()
         elif nav_id == "logs":
             self._reload_logs_page()
+            self._drain_log_queue_to_textbox()
 
     def bind_coordinator(self, coord: WaCoordinator) -> None:
         self._coord = coord
@@ -284,28 +294,33 @@ class WaPanel(ctk.CTkFrame):
             self._log_queue.put_nowait(line)
         except Exception:
             pass
-        if getattr(self, "_dash_logs", None):
-            self.after(0, lambda l=line: self._append_dash_log(l))
 
-    def _reload_logs_page(self) -> None:
+    def _drain_log_queue_to_textbox(self) -> None:
         lb = getattr(self, "_log_box", None)
         if lb is None:
             return
-        reload_log_textbox_from_memory(lb, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES)
-
-    def _pump_logs(self) -> None:
-        if not self._log_pump_on:
-            return
-        lb = getattr(self, "_log_box", None)
         while True:
             try:
                 line = self._log_queue.get_nowait()
             except queue.Empty:
                 break
-            if lb:
-                append_log_line_capped(lb, line)
+            append_log_line_capped(lb, line, max_lines=LOG_TEXTBOX_MAX_LINES)
+
+    def _reload_logs_page(self) -> None:
+        lb = getattr(self, "_log_box", None)
+        if lb is None:
+            return
+        reload_log_textbox_from_memory(lb, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES, max_lines=LOG_TEXTBOX_MAX_LINES)
+
+    def _pump_logs(self) -> None:
+        if not self._log_pump_on:
+            return
+        on_logs = getattr(self, "_current_nav", "") == "logs"
+        if on_logs:
+            self._drain_log_queue_to_textbox()
         if self._log_pump_on:
-            self.after(LOG_PUMP_MS, self._pump_logs)
+            delay = LOG_PUMP_MS if on_logs else LOG_PUMP_IDLE_MS
+            self.after(delay, self._pump_logs)
 
     def _save_and_reload(self) -> None:
         save_config(self._cfg)
@@ -365,12 +380,6 @@ class WaPanel(ctk.CTkFrame):
 
         scroll_widget.bind("<Configure>", sync)
         self.after(200, sync)
-
-    def _append_dash_log(self, line: str) -> None:
-        lb = getattr(self, "_dash_logs", None)
-        if not lb:
-            return
-        append_log_line_capped(lb, line, max_lines=DASH_LOG_MAX_LINES)
 
     def _refresh_dashboard(self) -> None:
         if not getattr(self, "_pages_ready", False):
@@ -435,28 +444,6 @@ class WaPanel(ctk.CTkFrame):
             anchor="w",
         )
         self._dash_acct.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
-
-        c4 = self._card(wrap, 4)
-        ctk.CTkLabel(c4, text="最近日志", font=ctk.CTkFont(size=13, weight="bold"), text_color=COLORS["text"]).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(12, 4)
-        )
-        self._dash_logs = ctk.CTkTextbox(
-            c4,
-            height=180,
-            font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=COLORS["bg"],
-            text_color=COLORS["muted"],
-            border_width=1,
-            border_color=COLORS["border"],
-        )
-        self._dash_logs.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
-        bind_log_textbox_wheel(self._dash_logs)
-        reload_log_textbox_from_memory(
-            self._dash_logs,
-            get_recent_lines,
-            limit=DASH_LOG_MAX_LINES,
-            max_lines=DASH_LOG_MAX_LINES,
-        )
 
         self._elastic_wraplabels(wrap, [self._dash_listen, self._dash_acct])
         self._refresh_dashboard()
@@ -712,20 +699,21 @@ class WaPanel(ctk.CTkFrame):
     # --- 通讯录 ---
     def _page_address(self) -> ctk.CTkFrame:
         page = ctk.CTkFrame(self._content, fg_color="transparent")
-        inner, canvas, finish = mount_page_scroll(page, bg=COLORS["bg"])
-        self._scroll_wheel_handler = lambda e, c=canvas: scroll_wheel(c, e)
-        ctk.CTkLabel(inner, text="通讯录", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(anchor="w", pady=8)
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+
+        header = ctk.CTkFrame(page, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew")
+        ctk.CTkLabel(header, text="通讯录", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(anchor="w", pady=(8, 4))
         ctk.CTkLabel(
-            inner,
-            text="群可填邀请链接或 @g.us；添加后自动解析群并刷新监听。请为每个群选择「主号/归属账号」（保存到配置，重启后仍有效）。"
-            "监听用户填手机号（含国家码）。每条可用 ↑↓ 调整顺序，定时任务页的群发目标顺序与此一致。",
+            header,
+            text="群可填邀请链接或 @g.us；请为每个群选择主号/归属账号。监听用户填手机号（含国家码）。↑↓ 调整顺序。",
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",
-        ).pack(anchor="w", pady=(0, 10))
-
-        form = ctk.CTkFrame(inner, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
-        form.pack(fill="x")
+        ).pack(anchor="w", pady=(0, 8))
+        form = ctk.CTkFrame(header, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        form.pack(fill="x", pady=(0, 8))
         self._ab_remark = ctk.CTkEntry(form, placeholder_text="备注")
         self._ab_chat = ctk.CTkEntry(form, placeholder_text="群 JID 或邀请链接")
         self._ab_user = ctk.CTkEntry(form, placeholder_text="监听用户手机号")
@@ -745,10 +733,20 @@ class WaPanel(ctk.CTkFrame):
         ctk.CTkCheckBox(form, text="参与监听", variable=self._ab_listen, text_color=COLORS["text"]).pack(anchor="w", padx=12, pady=4)
         ctk.CTkButton(form, text="添加到通讯录", fg_color=COLORS["accent"], command=self._add_address).pack(fill="x", padx=12, pady=12)
 
-        self._ab_rows = ctk.CTkFrame(inner, fg_color="transparent")
-        self._ab_rows.pack(fill="x", pady=8)
+        list_host = ctk.CTkFrame(page, fg_color="transparent")
+        list_host.grid(row=1, column=0, sticky="nsew")
+        list_card = ctk.CTkFrame(list_host, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        list_card.pack(fill="both", expand=True)
+        ctk.CTkLabel(list_card, text="通讯录列表", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(10, 4))
+        list_inner, list_canvas, finish_list, _shell = mount_bounded_list_scroll(
+            list_card, height=ADDRESS_LIST_HEIGHT, bg=COLORS["bg"]
+        )
+        self._ab_list_scroll_handler = lambda e, c=list_canvas: scroll_wheel(c, e)
+        self._ab_rows = ctk.CTkFrame(list_inner, fg_color="transparent")
+        self._ab_rows.pack(fill="x")
+        self._ab_scroll_bound = False
         self._render_address()
-        finish()
+        finish_list()
         return page
 
     def _owner_account_values(self) -> List[str]:
@@ -897,9 +895,11 @@ class WaPanel(ctk.CTkFrame):
             ctk.CTkButton(ctrl, text="删除", fg_color=COLORS["danger"], command=lambda e=ent: self._del_address(e)).pack(
                 fill="x", pady=(4, 0)
             )
-        handler = getattr(self, "_scroll_wheel_handler", None)
-        if handler:
-            bind_scroll_tree_once(self._ab_rows, handler)
+        if not getattr(self, "_ab_scroll_bound", False):
+            self._ab_scroll_bound = True
+            handler = getattr(self, "_ab_list_scroll_handler", None)
+            if handler:
+                bind_scroll_tree_once(self._ab_rows, handler)
 
     def _commit_address_book(self, *, resolve_online: bool = True) -> None:
         save_config(self._cfg)
@@ -986,7 +986,46 @@ class WaPanel(ctk.CTkFrame):
         self._rate_entry.insert(0, str(self._cfg.rate_limit_seconds))
         self._rate_entry.pack(fill="x", padx=14, pady=(4, 14))
         self._rate_entry.bind("<FocusOut>", lambda _e: self._save_rate())
+
+        sync_box = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        sync_box.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(
+            sync_box,
+            text="按「任务管理」当前任务列表，更新「定时任务」勾选目标后的「上次任务→」标记："
+            "有任务的群写入对应 TXT 文件名，无任务的群清空。",
+            text_color=COLORS["muted"],
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+        ctk.CTkButton(
+            sync_box,
+            text="从任务管理同步上次任务",
+            fg_color=COLORS["accent"],
+            hover_color="#1da851",
+            command=self._sync_last_schedule_from_jobs,
+        ).pack(fill="x", padx=14, pady=(0, 14))
         return page
+
+    def _sync_last_schedule_from_jobs(self) -> None:
+        from schedule2_runner import load_schedule2_jobs
+
+        before = {e.id: (e.last_schedule_source_name or "").strip() for e in self._cfg.address_book}
+        n_jobs = len(load_schedule2_jobs())
+        apply_last_schedule_from_current_jobs(self._cfg)
+        n_changed = sum(
+            1
+            for e in self._cfg.address_book
+            if before.get(e.id, "") != (e.last_schedule_source_name or "").strip()
+        )
+        n_filled = sum(1 for e in self._cfg.address_book if (e.last_schedule_source_name or "").strip())
+        self._refresh_s2_target_checks()
+        if n_changed:
+            info(
+                f"已同步「上次任务」：任务管理 {n_jobs} 个任务，"
+                f"更新 {n_changed} 条通讯录（{n_filled} 条有标记，{len(self._cfg.address_book) - n_filled} 条为空）"
+            )
+        else:
+            info(f"「上次任务」已与任务管理一致（{n_jobs} 个任务，{n_filled} 条有标记）")
 
     def _save_rate(self) -> None:
         try:
@@ -1007,8 +1046,26 @@ class WaPanel(ctk.CTkFrame):
         return ids if ids else ["—"]
 
     def _page_schedule(self) -> ctk.CTkFrame:
+        """群勾选在滚动区；间隔/TXT/添加固定在页底，勾群时无需来回滚动。"""
         page = ctk.CTkFrame(self._content, fg_color="transparent")
-        inner, canvas, finish = mount_page_scroll(page, bg=COLORS["bg"])
+
+        sched_foot = ctk.CTkFrame(page, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        sf = ctk.CTkFrame(sched_foot, fg_color="transparent")
+        sf.pack(fill="x", padx=12, pady=10)
+        ctk.CTkLabel(
+            sf,
+            text="默认发送间隔（分钟，如 5-10；TXT 未写 间隔= 时使用）",
+            text_color=COLORS["muted"],
+        ).pack(anchor="w", pady=(0, 4))
+        self._s2_interval = ctk.CTkEntry(sf)
+        self._s2_interval.insert(0, "5-10")
+        self._s2_interval.pack(fill="x", pady=(0, 6))
+        self._s2_file = ctk.CTkEntry(sf, placeholder_text="选择 TXT（主号=按群自动；其它账号=账号管理中的简称）")
+        self._s2_file.pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(sf, text="选择 TXT", fg_color=COLORS["border"], command=self._pick_s2_txt).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(sf, text="添加文档任务", fg_color=COLORS["accent"], command=self._add_s2_job).pack(fill="x")
+
+        inner, canvas, finish = mount_page_scroll(page, footer=sched_foot, bg=COLORS["bg"])
         self._scroll_wheel_handler = lambda e, c=canvas: scroll_wheel(c, e)
         ctk.CTkLabel(inner, text="定时任务", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(anchor="w", pady=8)
         ctk.CTkLabel(
@@ -1030,20 +1087,8 @@ class WaPanel(ctk.CTkFrame):
         form.pack(fill="x", pady=8)
         ctk.CTkLabel(form, text="勾选群发目标", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(10, 4))
         self._s2_targets = ctk.CTkFrame(form, fg_color="transparent")
-        self._s2_targets.pack(fill="x", padx=10, pady=4)
+        self._s2_targets.pack(fill="x", padx=10, pady=(4, 12))
         self._refresh_s2_target_checks()
-        ctk.CTkLabel(
-            form,
-            text="默认发送间隔（分钟，如 5-10；TXT 未写 间隔= 时使用）",
-            text_color=COLORS["muted"],
-        ).pack(anchor="w", padx=12, pady=(8, 4))
-        self._s2_interval = ctk.CTkEntry(form)
-        self._s2_interval.insert(0, "5-10")
-        self._s2_interval.pack(fill="x", padx=12, pady=4)
-        self._s2_file = ctk.CTkEntry(form, placeholder_text="选择 TXT（主号=按群自动；其它账号=账号管理中的简称）")
-        self._s2_file.pack(fill="x", padx=12, pady=4)
-        ctk.CTkButton(form, text="选择 TXT", fg_color=COLORS["border"], command=self._pick_s2_txt).pack(fill="x", padx=12, pady=4)
-        ctk.CTkButton(form, text="添加文档任务", fg_color=COLORS["accent"], command=self._add_s2_job).pack(fill="x", padx=12, pady=12)
 
         edit_card = ctk.CTkFrame(inner, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
         edit_card.pack(fill="x", pady=8)
@@ -1435,7 +1480,11 @@ class WaPanel(ctk.CTkFrame):
             ctk.CTkCheckBox(self._s2_targets, text=disp, variable=v, text_color=COLORS["text"]).pack(anchor="w", padx=4, pady=2)
 
     def _pick_s2_txt(self) -> None:
-        path = filedialog.askopenfilename(filetypes=[("文本", "*.txt"), ("所有", "*.*")])
+        kwargs: dict = {"filetypes": [("文本", "*.txt"), ("所有", "*.*")]}
+        start_dir = txt_open_initial_dir(self._s2_file.get() if hasattr(self, "_s2_file") else "")
+        if start_dir:
+            kwargs["initialdir"] = start_dir
+        path = filedialog.askopenfilename(**kwargs)
         if path and hasattr(self, "_s2_file"):
             self._s2_file.delete(0, "end")
             self._s2_file.insert(0, path)

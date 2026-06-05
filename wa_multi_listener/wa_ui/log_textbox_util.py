@@ -6,9 +6,9 @@ from typing import Any, Callable, List, Sequence
 
 import customtkinter as ctk
 
-LOG_TEXTBOX_MAX_LINES = 400
-DASH_LOG_MAX_LINES = 80
+LOG_TEXTBOX_MAX_LINES = 250
 LOG_PUMP_MS = 200
+LOG_PUMP_IDLE_MS = 800
 
 
 def reload_log_textbox(

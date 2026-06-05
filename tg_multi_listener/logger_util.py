@@ -11,7 +11,7 @@ from typing import Callable, Deque, List, Optional
 
 from .compat_config import LOGS_DIR, ensure_dirs
 
-_memory: Deque[str] = deque(maxlen=500)
+_memory: Deque[str] = deque(maxlen=250)
 _listeners: List[Callable[[str], None]] = []
 _lock = Lock()
 

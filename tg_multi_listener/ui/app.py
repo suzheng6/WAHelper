@@ -20,14 +20,21 @@ from wa_ui.taskmgr_tile_theme import (
     taskmgr_tile_palette,
 )
 from wa_ui.log_textbox_util import (
-    DASH_LOG_MAX_LINES,
+    LOG_PUMP_IDLE_MS,
     LOG_PUMP_MS,
     LOG_TEXTBOX_MAX_LINES,
     append_log_line_capped,
     bind_log_textbox_wheel,
     reload_log_textbox_from_memory,
 )
-from wa_ui.scroll_util import bind_scroll_tree_once, mount_page_scroll, scroll_wheel
+from wa_ui.file_picker_util import txt_open_initial_dir
+from wa_ui.scroll_util import (
+    ADDRESS_LIST_HEIGHT,
+    bind_scroll_tree_once,
+    mount_bounded_list_scroll,
+    mount_page_scroll,
+    scroll_wheel,
+)
 
 TASKMGR_TICK_MS = 5000
 
@@ -139,6 +146,7 @@ class MainWindow(ctk.CTkFrame):
         self._acc_listed_ids: List[str] = []
         self._log_ui_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._log_ui_pump_on = True
+        self._current_nav: NavId = "dash"
 
         if not embedded:
             root = master if isinstance(master, ctk.CTk) else master.winfo_toplevel()
@@ -464,30 +472,33 @@ class MainWindow(ctk.CTkFrame):
             self._log_ui_queue.put_nowait(line)
         except Exception:
             pass
-        dash = getattr(self, "_dash_logs", None)
-        if dash is not None:
-            self.after(0, lambda l=line: append_log_line_capped(dash, l, max_lines=DASH_LOG_MAX_LINES))
 
-    def _pump_log_ui_queue(self) -> None:
-        """主线程消费日志队列；Telethon/重载等后台线程只入队，避免跨线程直接改 Tk 卡死。"""
-        if not getattr(self, "_log_ui_pump_on", True):
-            return
+    def _drain_log_queue_to_textbox(self) -> None:
         lb = getattr(self, "_log_box", None)
-        for _ in range(300):
+        if lb is None:
+            return
+        for _ in range(500):
             try:
                 line = self._log_ui_queue.get_nowait()
             except queue.Empty:
                 break
-            if lb is None:
-                continue
             try:
-                append_log_line_capped(lb, line)
+                append_log_line_capped(lb, line, max_lines=LOG_TEXTBOX_MAX_LINES)
             except Exception:
                 break
+
+    def _pump_log_ui_queue(self) -> None:
+        """主线程消费日志队列；仅「日志中心」页刷新 Textbox，其它页降低泵频率。"""
+        if not getattr(self, "_log_ui_pump_on", True):
+            return
+        on_logs = getattr(self, "_current_nav", "") == "logs"
+        if on_logs:
+            self._drain_log_queue_to_textbox()
         if self._log_ui_pump_on:
             try:
                 if self.winfo_exists():
-                    self.after(LOG_PUMP_MS, self._pump_log_ui_queue)
+                    delay = LOG_PUMP_MS if on_logs else LOG_PUMP_IDLE_MS
+                    self.after(delay, self._pump_log_ui_queue)
             except Exception:
                 pass
 
@@ -539,23 +550,6 @@ class MainWindow(ctk.CTkFrame):
 
         threading.Thread(target=worker, daemon=True, name="tg-restart-services").start()
 
-    def _toggle_window_zoom(self) -> None:
-        """仅在「固定小窗口」与「最大化」之间切换，不提供任意拉伸。"""
-        try:
-            if self.state() == "zoomed":
-                self.state("normal")
-                self.after(80, lambda: self.geometry(MAIN_WINDOW_GEOMETRY))
-            else:
-                self.state("zoomed")
-        except TclError:
-            try:
-                z = bool(self.attributes("-zoomed"))
-                self.attributes("-zoomed", not z)
-                if z:
-                    self.after(80, lambda: self.geometry(MAIN_WINDOW_GEOMETRY))
-            except Exception:
-                info("当前环境无法程序化最大化，请使用窗口标题栏按钮")
-
     def _build_sidebar(self) -> None:
         side = ctk.CTkFrame(self, width=SIDEBAR_WIDTH, fg_color=COLORS["sidebar"], corner_radius=0)
         side.grid(row=0, column=0, sticky="nsew")
@@ -600,13 +594,6 @@ class MainWindow(ctk.CTkFrame):
             command=self._save_all_and_restart,
         )
         save_btn.pack(side="bottom", fill="x", padx=14, pady=(8, 16))
-
-        ctk.CTkButton(
-            side,
-            text="最大化 / 还原",
-            fg_color=COLORS["border"],
-            command=self._toggle_window_zoom,
-        ).pack(side="bottom", fill="x", padx=14, pady=(0, 8))
 
     def _wrap_page(self, parent: ctk.CTkFrame, title: str) -> ctk.CTkFrame:
         wrap, finish = self._mount_main_scroll(parent)
@@ -653,6 +640,7 @@ class MainWindow(ctk.CTkFrame):
     def _show_nav(self, nav_id: NavId) -> None:
         if not self._pages_ready or not self._nav:
             return
+        self._current_nav = nav_id
         for k, fr in self._nav.items():
             if k == nav_id:
                 fr.grid()
@@ -673,6 +661,7 @@ class MainWindow(ctk.CTkFrame):
             self._render_taskmgr_cards()
         elif nav_id == "logs":
             self._flush_logs_ui()
+            self._drain_log_queue_to_textbox()
 
     def _schedule_login_probe(self) -> None:
         """后台检测各账号 session 是否已授权；结果用于账号行样式与仪表盘。"""
@@ -762,28 +751,6 @@ class MainWindow(ctk.CTkFrame):
         )
         self._dash_acct.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
 
-        c4 = self._card(wrap, 4)
-        ctk.CTkLabel(c4, text="最近日志", font=ctk.CTkFont(size=13, weight="bold"), text_color=COLORS["text"]).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(12, 4)
-        )
-        self._dash_logs = ctk.CTkTextbox(
-            c4,
-            height=180,
-            font=ctk.CTkFont(family="Consolas", size=12),
-            fg_color=COLORS["bg"],
-            text_color=COLORS["muted"],
-            border_width=1,
-            border_color=COLORS["border"],
-        )
-        self._dash_logs.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 12))
-        bind_log_textbox_wheel(self._dash_logs)
-        reload_log_textbox_from_memory(
-            self._dash_logs,
-            get_recent_lines,
-            limit=DASH_LOG_MAX_LINES,
-            max_lines=DASH_LOG_MAX_LINES,
-        )
-
         self._elastic_wraplabels(wrap, [self._dash_listen, self._dash_acct])
         return page
 
@@ -813,13 +780,6 @@ class MainWindow(ctk.CTkFrame):
             extra = f"，文件:{a.session_name}" if a.session_name != a.id else ""
             lines.append(f"{a.id} · {st_txt} · {'启用' if a.enabled else '停用'}{extra}")
         self._dash_acct.configure(text="\n".join(lines) if lines else "（未配置账号）")
-        if hasattr(self, "_dash_logs"):
-            reload_log_textbox_from_memory(
-                self._dash_logs,
-                get_recent_lines,
-                limit=DASH_LOG_MAX_LINES,
-                max_lines=DASH_LOG_MAX_LINES,
-            )
 
     # --- accounts ---
     def _page_accounts(self) -> ctk.CTkFrame:
@@ -1189,60 +1149,68 @@ class MainWindow(ctk.CTkFrame):
     # --- 通讯录（群 + 用户，一处保存后监听/定时任务里选用） ---
     def _page_groups(self) -> ctk.CTkFrame:
         page = ctk.CTkFrame(self._content, fg_color="transparent")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
 
-        grp_foot = ctk.CTkFrame(page, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
-        gf = ctk.CTkFrame(grp_foot, fg_color="transparent")
-        gf.pack(fill="x", padx=12, pady=10)
-        ctk.CTkButton(gf, text="添加到通讯录", fg_color=COLORS["accent"], command=self._add_address_entry).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(gf, text="保存通讯录", fg_color=COLORS["border"], command=self._save_address_book).pack(fill="x")
-
-        wrap, finish_scroll = self._mount_main_scroll(page, footer=grp_foot)
-        ctk.CTkLabel(wrap, text="通讯录（群与用户）", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(
-            anchor="w", pady=(8, 8)
-        )
+        header = ctk.CTkFrame(page, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew")
         intro_grp = ctk.CTkLabel(
-            wrap,
-            text="填写「备注、群、监听用户」后点「添加到通讯录」写入 config.json。"
-            "列表为只读摘要，点「编辑」修改详情；↑↓ 调整顺序。定时任务页群发目标顺序与此一致。"
-            "若要让 Telegram 监听立刻按新通讯录生效，请在侧栏点「保存并重载服务」。",
+            header,
+            text="填写「备注、群、监听用户」后点底部「添加到通讯录」。"
+            "列表为只读摘要，点「编辑」修改详情；↑↓ 调整顺序。监听生效请点侧栏「保存并重载服务」。",
             text_color=COLORS["muted"],
             wraplength=520,
             justify="left",
         )
-        intro_grp.pack(anchor="w", pady=(0, 10))
-
-        hint = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
-        hint.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(header, text="通讯录（群与用户）", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(
+            anchor="w", pady=(8, 4)
+        )
+        intro_grp.pack(anchor="w", pady=(0, 6))
+        hint = ctk.CTkFrame(header, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        hint.pack(fill="x", pady=(0, 8))
         ctk.CTkLabel(hint, text="填写说明", font=ctk.CTkFont(size=13, weight="bold"), text_color=COLORS["text"]).pack(
-            anchor="w", padx=14, pady=(12, 6)
+            anchor="w", padx=14, pady=(10, 4)
         )
-        gid_help = (
-            "群：可填 -100… 数字 ID、公开 @群用户名或 t.me 链接。\n"
-            "监听用户：填数字 ID 或 @用户名；若本条仅用于定时群发、不参与关键字监听，请取消勾选「参与监听」，用户可留空。\n"
-            "勾选「参与监听」时，必须填写监听用户。"
+        gid_lbl = ctk.CTkLabel(
+            hint,
+            text="群：-100… ID、@群名或 t.me 链接。参与监听须填用户；仅定时群发可取消勾选并留空用户。",
+            text_color=COLORS["muted"],
+            justify="left",
+            wraplength=520,
         )
-        gid_lbl = ctk.CTkLabel(hint, text=gid_help, text_color=COLORS["muted"], justify="left", wraplength=520)
-        gid_lbl.pack(anchor="w", padx=14, pady=(0, 14))
+        gid_lbl.pack(anchor="w", padx=14, pady=(0, 10))
 
-        self._elastic_wraplabels(wrap, [intro_grp, gid_lbl])
-
-        self._grp_rows = ctk.CTkFrame(wrap, fg_color="transparent")
+        list_host = ctk.CTkFrame(page, fg_color="transparent")
+        list_host.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
+        list_card = ctk.CTkFrame(list_host, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        list_card.pack(fill="both", expand=True)
+        ctk.CTkLabel(list_card, text="通讯录列表", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(10, 4))
+        list_inner, list_canvas, finish_list, _list_shell = mount_bounded_list_scroll(
+            list_card, height=ADDRESS_LIST_HEIGHT, bg=COLORS["bg"]
+        )
+        self._grp_list_scroll_handler = lambda e, c=list_canvas: scroll_wheel(c, e)
+        self._grp_rows = ctk.CTkFrame(list_inner, fg_color="transparent")
         self._grp_rows.pack(fill="x")
+        self._grp_scroll_bound = False
+        self._render_group_rows()
+        finish_list()
 
-        form = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
-        form.pack(fill="x")
-        ctk.CTkLabel(form, text="备注（显示名）", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(12, 4))
+        grp_foot = ctk.CTkFrame(page, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        grp_foot.grid(row=2, column=0, sticky="ew")
+        form = ctk.CTkFrame(grp_foot, fg_color="transparent")
+        form.pack(fill="x", padx=12, pady=10)
+        ctk.CTkLabel(form, text="备注（显示名）", text_color=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
         self._addr_remark = ctk.CTkEntry(form, placeholder_text="如：客户群A")
-        self._addr_remark.pack(fill="x", padx=12, pady=(0, 8))
-        ctk.CTkLabel(form, text="群", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(4, 4))
+        self._addr_remark.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(form, text="群", text_color=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
         self._addr_chat = ctk.CTkEntry(form, placeholder_text="数字 ID / @群名 / t.me 链接")
-        self._addr_chat.pack(fill="x", padx=12, pady=(0, 8))
-        ctk.CTkLabel(form, text="监听用户（不参与监听可留空）", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(4, 4))
+        self._addr_chat.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(form, text="监听用户（不参与监听可留空）", text_color=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
         self._addr_user = ctk.CTkEntry(form, placeholder_text="数字 ID 或 @用户名")
-        self._addr_user.pack(fill="x", padx=12, pady=(0, 8))
+        self._addr_user.pack(fill="x", pady=(0, 6))
         own_row = ctk.CTkFrame(form, fg_color="transparent")
-        own_row.pack(fill="x", padx=12, pady=(0, 8))
-        ctk.CTkLabel(own_row, text="归属账号（必选，重启后保留）", text_color=COLORS["muted"]).pack(side="left", padx=(0, 8))
+        own_row.pack(fill="x", pady=(0, 6))
+        ctk.CTkLabel(own_row, text="归属账号（必选）", text_color=COLORS["muted"]).pack(side="left", padx=(0, 8))
         acc_own = self._owner_account_values()
         if not acc_own:
             ctk.CTkLabel(own_row, text="请先在账号管理添加账号", text_color=COLORS["danger"]).pack(side="left")
@@ -1251,15 +1219,9 @@ class MainWindow(ctk.CTkFrame):
         if acc_own:
             self._addr_owner.set(acc_own[0])
         self._addr_listen = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(
-            form,
-            text="参与监听",
-            variable=self._addr_listen,
-            text_color=COLORS["text"],
-        ).pack(anchor="w", padx=12, pady=(4, 12))
-
-        self._render_group_rows()
-        finish_scroll()
+        ctk.CTkCheckBox(form, text="参与监听", variable=self._addr_listen, text_color=COLORS["text"]).pack(anchor="w", pady=(0, 8))
+        ctk.CTkButton(form, text="添加到通讯录", fg_color=COLORS["accent"], command=self._add_address_entry).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(form, text="保存通讯录", fg_color=COLORS["border"], command=self._save_address_book).pack(fill="x")
         return page
 
     def _commit_address_book(self, *, resolve_online: bool = True) -> None:
@@ -1422,7 +1384,7 @@ class MainWindow(ctk.CTkFrame):
             self._grp_row_fp_cache[ent.id] = self._group_row_fingerprint(i, ent, n_book)
         if not self._grp_scroll_bound:
             self._grp_scroll_bound = True
-            handler = getattr(self, "_scroll_wheel_handler", None)
+            handler = getattr(self, "_grp_list_scroll_handler", None)
             if handler:
                 bind_scroll_tree_once(self._grp_rows, handler)
 
@@ -1628,8 +1590,46 @@ class MainWindow(ctk.CTkFrame):
                 pass
 
         self._rate_entry.bind("<FocusOut>", save_rate)
+
+        sync_box = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        sync_box.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(
+            sync_box,
+            text="按「任务管理」当前任务列表，更新「定时任务」勾选目标后的「上次任务→」标记："
+            "有任务的群写入对应文档名，无任务的群清空。",
+            text_color=COLORS["muted"],
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+        ctk.CTkButton(
+            sync_box,
+            text="从任务管理同步上次任务",
+            fg_color=COLORS["accent"],
+            hover_color="#3d7ae6",
+            command=self._sync_last_schedule_from_jobs,
+        ).pack(fill="x", padx=14, pady=(0, 14))
         finish_scroll()
         return page
+
+    def _sync_last_schedule_from_jobs(self) -> None:
+        before = {e.id: (e.last_schedule_source_name or "").strip() for e in self._cfg.address_book}
+        n_jobs = len(load_jobs())
+        apply_last_schedule_from_current_jobs(self._cfg)
+        n_changed = sum(
+            1
+            for e in self._cfg.address_book
+            if before.get(e.id, "") != (e.last_schedule_source_name or "").strip()
+        )
+        n_filled = sum(1 for e in self._cfg.address_book if (e.last_schedule_source_name or "").strip())
+        self._sched_targets_dirty = False
+        self._refresh_schedule_target_checks()
+        if n_changed:
+            info(
+                f"已同步「上次任务」：任务管理 {n_jobs} 个任务，"
+                f"更新 {n_changed} 条通讯录（{n_filled} 条有标记，{len(self._cfg.address_book) - n_filled} 条为空）"
+            )
+        else:
+            info(f"「上次任务」已与任务管理一致（{n_jobs} 个任务，{n_filled} 条有标记）")
 
     # --- schedule ---
     def _schedule_doc_path(self) -> str:
@@ -1647,18 +1647,36 @@ class MainWindow(ctk.CTkFrame):
             info(f"未找到示例文档：{path}")
 
     def _page_schedule(self) -> ctk.CTkFrame:
-        """布局对齐 WA 助手：单页可滚动 + 表单与任务列表。"""
+        """群勾选在滚动区；间隔/TXT/添加固定在页底，勾群时无需来回滚动。"""
         page = ctk.CTkFrame(self._content, fg_color="transparent")
-        wrap, finish_scroll = self._mount_main_scroll(page)
-        ctk.CTkLabel(wrap, text="定时任务", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(anchor="w", pady=8)
+
+        sched_foot = ctk.CTkFrame(page, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        sf = ctk.CTkFrame(sched_foot, fg_color="transparent")
+        sf.pack(fill="x", padx=12, pady=10)
         ctk.CTkLabel(
+            sf,
+            text="固定间隔（分钟，如 5-10；TXT 未写 间隔= 时使用）",
+            text_color=COLORS["muted"],
+        ).pack(anchor="w", pady=(0, 4))
+        self._sched_interval = ctk.CTkEntry(sf, placeholder_text="如 5-10")
+        self._sched_interval.insert(0, "5-10")
+        self._sched_interval.pack(fill="x", pady=(0, 6))
+        self._jfile = ctk.CTkEntry(sf, placeholder_text="选择 TXT（可含未添加的原文账号，导入后再批量替换）")
+        self._jfile.pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(sf, text="选择 TXT", fg_color=COLORS["border"], command=self._pick_schedule_txt).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(sf, text="添加文档任务", fg_color=COLORS["accent"], command=self._add_job).pack(fill="x")
+
+        wrap, finish_scroll = self._mount_main_scroll(page, footer=sched_foot)
+        ctk.CTkLabel(wrap, text="定时任务", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(anchor="w", pady=8)
+        sched_intro = ctk.CTkLabel(
             wrap,
             text="可添加多个文档任务并行。TXT 里 账号=主号 表示由通讯录中该群选择的「归属账号」发送；"
             "其它账号名保持不变。勾选几个群就创建几个独立任务，可分别开始/暂停；含主号时按各群归属账号映射。",
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",
-        ).pack(anchor="w", pady=(0, 8))
+        )
+        sched_intro.pack(anchor="w", pady=(0, 8))
         ctk.CTkButton(
             wrap,
             text="打开 TXT 格式说明与示例",
@@ -1670,19 +1688,7 @@ class MainWindow(ctk.CTkFrame):
         form.pack(fill="x", pady=8)
         ctk.CTkLabel(form, text="勾选群发目标", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(10, 4))
         self._sched_targets = ctk.CTkFrame(form, fg_color="transparent")
-        self._sched_targets.pack(fill="x", padx=10, pady=4)
-        ctk.CTkLabel(
-            form,
-            text="固定间隔（分钟，如 5-10；TXT 未写 间隔= 时使用）",
-            text_color=COLORS["muted"],
-        ).pack(anchor="w", padx=12, pady=(8, 4))
-        self._sched_interval = ctk.CTkEntry(form, placeholder_text="如 5-10")
-        self._sched_interval.insert(0, "5-10")
-        self._sched_interval.pack(fill="x", padx=12, pady=4)
-        self._jfile = ctk.CTkEntry(form, placeholder_text="选择 TXT（可含未添加的原文账号，导入后再批量替换）")
-        self._jfile.pack(fill="x", padx=12, pady=4)
-        ctk.CTkButton(form, text="选择 TXT", fg_color=COLORS["border"], command=self._pick_schedule_txt).pack(fill="x", padx=12, pady=4)
-        ctk.CTkButton(form, text="添加文档任务", fg_color=COLORS["accent"], command=self._add_job).pack(fill="x", padx=12, pady=12)
+        self._sched_targets.pack(fill="x", padx=10, pady=(4, 12))
 
         edit_card = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
         edit_card.pack(fill="x", pady=8)
@@ -1713,13 +1719,15 @@ class MainWindow(ctk.CTkFrame):
         self._sched_target_vars = []
         self._refresh_schedule_target_checks()
 
-        ctk.CTkLabel(
+        sched_note = ctk.CTkLabel(
             wrap,
             text="任务运行状态、暂停/继续请在侧栏「任务管理」中查看与控制；本页仅用于添加任务与批量改账号。",
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",
-        ).pack(anchor="w", pady=(8, 4))
+        )
+        sched_note.pack(anchor="w", pady=(8, 4))
+        self._elastic_wraplabels(wrap, [sched_intro, sched_note])
         finish_scroll()
         return page
 
@@ -2065,14 +2073,15 @@ class MainWindow(ctk.CTkFrame):
             info("没有可恢复的暂停或已停止任务")
 
     def _pick_schedule_txt(self) -> None:
-        doc_path = self._schedule_doc_path()
-        start_dir = os.path.dirname(doc_path) if os.path.isfile(doc_path) else app_root()
-        path = filedialog.askopenfilename(
-            parent=self,
-            title="选择 UTF-8 编码 TXT（仅账号+消息）",
-            filetypes=[("文本", "*.txt"), ("所有文件", "*.*")],
-            initialdir=start_dir,
-        )
+        kwargs: dict = {
+            "parent": self,
+            "title": "选择 UTF-8 编码 TXT（仅账号+消息）",
+            "filetypes": [("文本", "*.txt"), ("所有文件", "*.*")],
+        }
+        start_dir = txt_open_initial_dir(self._jfile.get() if getattr(self, "_jfile", None) else "")
+        if start_dir:
+            kwargs["initialdir"] = start_dir
+        path = filedialog.askopenfilename(**kwargs)
         if path:
             self._jfile.delete(0, "end")
             self._jfile.insert(0, path)
@@ -2647,7 +2656,7 @@ class MainWindow(ctk.CTkFrame):
         lb = getattr(self, "_log_box", None)
         if lb is None:
             return
-        reload_log_textbox_from_memory(lb, get_recent_lines, limit=500, max_lines=LOG_TEXTBOX_MAX_LINES)
+        reload_log_textbox_from_memory(lb, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES, max_lines=LOG_TEXTBOX_MAX_LINES)
 
     def _save_all_and_restart(self) -> None:
         if not getattr(self, "_pages_ready", False):

@@ -226,3 +226,20 @@ def mount_page_scroll(
             page.after(250, update_scrollregion)
 
     return inner, canvas, finish_scroll_bind
+
+
+ADDRESS_LIST_HEIGHT = 400
+
+
+def mount_bounded_list_scroll(
+    parent: ctk.CTkFrame,
+    *,
+    height: int = ADDRESS_LIST_HEIGHT,
+    bg: str = "#1a1a1a",
+) -> tuple[ctk.CTkFrame, tk.Canvas, Callable[[], None], ctk.CTkFrame]:
+    """固定高度的列表滚动区（通讯录群列表等），避免整页 Canvas 过长。"""
+    shell = ctk.CTkFrame(parent, fg_color="transparent", height=height)
+    shell.pack(fill="both", expand=True)
+    shell.pack_propagate(False)
+    inner, canvas, finish = mount_page_scroll(shell, bg=bg)
+    return inner, canvas, finish, shell
