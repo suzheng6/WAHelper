@@ -120,6 +120,7 @@ class WaPanel(ctk.CTkFrame):
         self._taskmgr_fp_cache: Dict[str, tuple] = {}
         self._taskmgr_toggle_busy = False
         self._watch_audit_flags: Dict[str, str] = {}
+        self._watch_audit_details: Dict[str, str] = {}
 
         self.configure(fg_color=COLORS["bg"])
         self.grid_columnconfigure(1, weight=1)
@@ -1069,7 +1070,9 @@ class WaPanel(ctk.CTkFrame):
                 COLORS["danger"],
             )
         if st == WatchAuditStatus.ERROR.value:
-            return ("\n⚠ 未能检测（群或用户解析失败）", COLORS["border"])
+            detail = (self._watch_audit_details.get(ent.id) or "").strip()
+            msg = detail or "群或用户解析失败"
+            return (f"\n⚠ 未能检测：{msg}", COLORS["border"])
         if st == WatchAuditStatus.OFFLINE.value:
             return ("\n⚠ 归属账号未在线，未检测", COLORS["border"])
         return "", COLORS["border"]
@@ -1088,12 +1091,21 @@ class WaPanel(ctk.CTkFrame):
 
     def _apply_watch_membership_audit(self, result: Dict[str, WatchAuditRow]) -> None:
         flags: Dict[str, str] = {eid: row.status.value for eid, row in result.items()}
+        details: Dict[str, str] = {
+            eid: (row.detail or "").strip()
+            for eid, row in result.items()
+            if (row.detail or "").strip()
+        }
         ok = sum(1 for r in result.values() if r.status == WatchAuditStatus.OK)
         absent = sum(1 for r in result.values() if r.status == WatchAuditStatus.ABSENT)
         err = sum(1 for r in result.values() if r.status == WatchAuditStatus.ERROR)
         offline = sum(1 for r in result.values() if r.status == WatchAuditStatus.OFFLINE)
         self._watch_audit_flags = flags
+        self._watch_audit_details = details
         self._render_address()
+        if not result:
+            info("检测未完成：请确认 WhatsApp 已登录并点「保存并重载服务」后重试。")
+            return
         parts = [f"已检测 {ok + absent} 条监听绑定"]
         if absent:
             parts.append(f"{absent} 条用户不在群内（通讯录已标红）")

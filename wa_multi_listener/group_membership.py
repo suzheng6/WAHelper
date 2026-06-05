@@ -1,12 +1,19 @@
 """确认监听账号是否已加入目标群，并从成员表解析监听用户 JID/LID。"""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Set
+from typing import TYPE_CHECKING, List, Optional, Set
 
 from neonize.proto.Neonize_pb2 import JID
 
 from logger_util import info, warning
-from wa_jid import jid_nonempty, jid_to_key, keys_for_match, normalize_phone, phones_equivalent
+from wa_jid import (
+    _phone_for_sender_jid,
+    jid_nonempty,
+    jid_to_key,
+    keys_for_match,
+    normalize_phone,
+    phones_equivalent,
+)
 
 if TYPE_CHECKING:
     from neonize.aioze.client import NewAClient
@@ -22,6 +29,28 @@ def _iter_participants(gi) -> List:
         return list(parts)
     except TypeError:
         return []
+
+
+async def _participant_matches_watch_phone(
+    client: "NewAClient",
+    participant,
+    watch_phone: str,
+) -> bool:
+    """成员表里 PhoneNumber 常为空，需同时比对 JID / LID。"""
+    pphone = normalize_phone(getattr(participant, "PhoneNumber", None) or "")
+    if pphone and phones_equivalent(watch_phone, pphone):
+        return True
+    for attr in ("JID", "LID"):
+        pjid = getattr(participant, attr, None)
+        if not jid_nonempty(pjid):
+            continue
+        if getattr(pjid, "Server", "") == "s.whatsapp.net":
+            if phones_equivalent(watch_phone, pjid.User):
+                return True
+        phone = await _phone_for_sender_jid(client, pjid)
+        if phone and phones_equivalent(watch_phone, phone):
+            return True
+    return False
 
 
 async def verify_account_in_group(client: "NewAClient", group_jid: JID, *, label: str = "") -> None:
@@ -79,28 +108,30 @@ async def resolve_watch_user_keys_in_group(
         return keys
 
     for p in _iter_participants(gi):
-        pphone = normalize_phone(p.PhoneNumber or "")
-        if not pphone or not phones_equivalent(watch_phone, pphone):
-            continue
-        parts: list[str] = []
-        if jid_nonempty(p.JID):
-            keys.update(keys_for_match(p.JID))
-            parts.append(jid_to_key(p.JID))
-        if jid_nonempty(p.LID):
-            keys.update(keys_for_match(p.LID))
-            parts.append(jid_to_key(p.LID))
-        if not quiet:
-            info(
-                f"群「{tag}」：成员表已锁定监听用户 {watch_phone} → "
-                + " / ".join(parts)
-            )
-        return keys
+        if await _participant_matches_watch_phone(client, p, watch_phone):
+            parts: list[str] = []
+            if jid_nonempty(p.JID):
+                keys.update(keys_for_match(p.JID))
+                parts.append(jid_to_key(p.JID))
+            if jid_nonempty(p.LID):
+                keys.update(keys_for_match(p.LID))
+                parts.append(jid_to_key(p.LID))
+            if not quiet:
+                info(
+                    f"群「{tag}」：成员表已锁定监听用户 {watch_phone} → "
+                    + " / ".join(parts)
+                )
+            return keys
 
     if not quiet:
-        warning(
-            f"群「{tag}」：成员表中未找到 {watch_phone}（共 {len(_iter_participants(gi))} 人）。"
-            "请确认号码含国家码；仍将尝试按消息发送者 JID 匹配。"
-        )
+        n = len(_iter_participants(gi))
+        if n == 0:
+            warning(f"群「{tag}」：成员列表为空，无法确认 {watch_phone} 是否在群内。")
+        else:
+            warning(
+                f"群「{tag}」：成员表中未找到 {watch_phone}（共 {n} 人）。"
+                "请确认号码含国家码；仍将尝试按消息发送者 JID 匹配。"
+            )
     return keys
 
 
@@ -110,11 +141,20 @@ async def watch_user_in_group(
     watch_phone: str,
     *,
     label: str = "",
-) -> bool:
-    keys = await resolve_watch_user_keys_in_group(
-        client, group_jid, watch_phone, label=label, quiet=True
-    )
-    return bool(keys)
+) -> Optional[bool]:
+    """True=在群内，False=不在，None=成员列表不可用无法判断。"""
+    tag = label or jid_to_key(group_jid)
+    try:
+        gi = await client.get_group_info(group_jid)
+    except Exception:
+        raise
+    parts = _iter_participants(gi)
+    if not parts:
+        return None
+    for p in parts:
+        if await _participant_matches_watch_phone(client, p, watch_phone):
+            return True
+    return False
 
 
 def extra_group_chat_keys(gi) -> Set[str]:
