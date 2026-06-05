@@ -1,6 +1,7 @@
 """确认监听账号是否已加入目标群，并从成员表解析监听用户 JID/LID。"""
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, List, Optional, Set
 
 from neonize.proto.Neonize_pb2 import JID
@@ -18,17 +19,39 @@ from wa_jid import (
 if TYPE_CHECKING:
     from neonize.aioze.client import NewAClient
 
+GROUP_INFO_TIMEOUT_SEC = 20.0
+
+
+async def _get_group_info_timed(client: "NewAClient", group_jid: JID) -> object:
+    try:
+        return await asyncio.wait_for(
+            client.get_group_info(group_jid),
+            timeout=GROUP_INFO_TIMEOUT_SEC,
+        )
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"读取群信息超时（{GROUP_INFO_TIMEOUT_SEC:g} 秒）") from exc
+
 
 def _iter_participants(gi) -> List:
     parts = getattr(gi, "Participants", None)
     if parts is None:
         return []
-    if isinstance(parts, JID):
-        return []
+    out: List = []
     try:
-        return list(parts)
+        for item in parts:
+            out.append(item)
+        return out
     except TypeError:
-        return []
+        pass
+    if isinstance(parts, JID) and jid_nonempty(parts):
+        return [parts]
+    if hasattr(parts, "PhoneNumber") or hasattr(parts, "JID") or hasattr(parts, "LID"):
+        return [parts]
+    return []
+
+
+def _is_group_participant_row(row) -> bool:
+    return hasattr(row, "PhoneNumber") or hasattr(row, "JID") or hasattr(row, "LID")
 
 
 async def _participant_matches_watch_phone(
@@ -36,7 +59,17 @@ async def _participant_matches_watch_phone(
     participant,
     watch_phone: str,
 ) -> bool:
-    """成员表里 PhoneNumber 常为空，需同时比对 JID / LID。"""
+    """成员表里 PhoneNumber 常为空；条目可能是 GroupParticipant 或裸 JID。"""
+    if isinstance(participant, JID) and jid_nonempty(participant):
+        if participant.Server == "s.whatsapp.net":
+            if phones_equivalent(watch_phone, str(participant.User or "")):
+                return True
+        phone = await _phone_for_sender_jid(client, participant)
+        return bool(phone and phones_equivalent(watch_phone, phone))
+
+    if not _is_group_participant_row(participant):
+        return False
+
     pphone = normalize_phone(getattr(participant, "PhoneNumber", None) or "")
     if pphone and phones_equivalent(watch_phone, pphone):
         return True
@@ -45,7 +78,7 @@ async def _participant_matches_watch_phone(
         if not jid_nonempty(pjid):
             continue
         if getattr(pjid, "Server", "") == "s.whatsapp.net":
-            if phones_equivalent(watch_phone, pjid.User):
+            if phones_equivalent(watch_phone, str(getattr(pjid, "User", "") or "")):
                 return True
         phone = await _phone_for_sender_jid(client, pjid)
         if phone and phones_equivalent(watch_phone, phone):
@@ -62,7 +95,7 @@ async def verify_account_in_group(client: "NewAClient", group_jid: JID, *, label
         info(f"群「{tag}」：账号信息未就绪，暂无法校验是否已入群")
         return
     try:
-        gi = await client.get_group_info(group_jid)
+        gi = await _get_group_info_timed(client, group_jid)
     except Exception as exc:
         warning(f"群「{tag}」：读取群信息失败（{exc}），请确认监听账号已加入该群")
         return
@@ -71,10 +104,18 @@ async def verify_account_in_group(client: "NewAClient", group_jid: JID, *, label
     my_phone = normalize_phone(me.User)
     in_group = False
     for p in _iter_participants(gi):
-        if jid_nonempty(p.JID) and jid_to_key(p.JID) == my_key:
-            in_group = True
-            break
-        pphone = normalize_phone(p.PhoneNumber or "")
+        if _is_group_participant_row(p):
+            if jid_nonempty(getattr(p, "JID", None)) and jid_to_key(p.JID) == my_key:
+                in_group = True
+                break
+            pphone = normalize_phone(getattr(p, "PhoneNumber", None) or "")
+        elif isinstance(p, JID) and jid_nonempty(p):
+            if jid_to_key(p) == my_key:
+                in_group = True
+                break
+            pphone = normalize_phone(p.User or "")
+        else:
+            continue
         if pphone and my_phone and phones_equivalent(my_phone, pphone):
             in_group = True
             break
@@ -101,7 +142,7 @@ async def resolve_watch_user_keys_in_group(
     tag = label or jid_to_key(group_jid)
     keys: Set[str] = set()
     try:
-        gi = await client.get_group_info(group_jid)
+        gi = await _get_group_info_timed(client, group_jid)
     except Exception as exc:
         if not quiet:
             warning(f"群「{tag}」：读取成员失败，无法锁定监听用户 {watch_phone}（{exc}）")
@@ -110,12 +151,16 @@ async def resolve_watch_user_keys_in_group(
     for p in _iter_participants(gi):
         if await _participant_matches_watch_phone(client, p, watch_phone):
             parts: list[str] = []
-            if jid_nonempty(p.JID):
-                keys.update(keys_for_match(p.JID))
-                parts.append(jid_to_key(p.JID))
-            if jid_nonempty(p.LID):
-                keys.update(keys_for_match(p.LID))
-                parts.append(jid_to_key(p.LID))
+            if _is_group_participant_row(p):
+                if jid_nonempty(getattr(p, "JID", None)):
+                    keys.update(keys_for_match(p.JID))
+                    parts.append(jid_to_key(p.JID))
+                if jid_nonempty(getattr(p, "LID", None)):
+                    keys.update(keys_for_match(p.LID))
+                    parts.append(jid_to_key(p.LID))
+            elif isinstance(p, JID) and jid_nonempty(p):
+                keys.update(keys_for_match(p))
+                parts.append(jid_to_key(p))
             if not quiet:
                 info(
                     f"群「{tag}」：成员表已锁定监听用户 {watch_phone} → "
@@ -145,7 +190,7 @@ async def watch_user_in_group(
     """True=在群内，False=不在，None=成员列表不可用无法判断。"""
     tag = label or jid_to_key(group_jid)
     try:
-        gi = await client.get_group_info(group_jid)
+        gi = await _get_group_info_timed(client, group_jid)
     except Exception:
         raise
     parts = _iter_participants(gi)

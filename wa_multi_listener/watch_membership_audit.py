@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
@@ -11,11 +10,13 @@ from neonize.aioze.client import NewAClient
 from neonize.proto.Neonize_pb2 import JID
 
 from config import AppConfig, parse_watch_user_input
-from group_membership import watch_user_in_group
+from group_membership import GROUP_INFO_TIMEOUT_SEC, watch_user_in_group
 from invite_resolve import resolve_invite_ref
-from logger_util import warning
-from wa_jid import invite_code_from_link, jid_from_chat_key, jid_nonempty, keys_for_chat_ref, parse_chat_ref_to_jid
+from logger_util import info, warning
+from wa_jid import invite_code_from_link, jid_from_chat_key, keys_for_chat_ref, parse_chat_ref_to_jid
 from wa_send import resolve_chat_jid
+
+GROUP_RESOLVE_TIMEOUT_SEC = 25.0
 
 
 class WatchAuditStatus(str, Enum):
@@ -33,23 +34,15 @@ class WatchAuditRow:
     detail: str = ""
 
 
-async def _soft_wait_client_me(client: NewAClient, *, timeout: float = 45.0) -> bool:
-    """等待 client.me；超时后仍继续尝试读群成员（部分环境下 me 迟迟不同步但 API 可用）。"""
-    deadline = time.monotonic() + max(1.0, timeout)
-    while time.monotonic() < deadline:
-        me = client.me
-        if me is not None and jid_nonempty(me):
-            return True
-        await asyncio.sleep(0.5)
-    return False
-
-
 async def _resolve_group_jid(client: NewAClient, chat_ref: str) -> JID:
     cref = (chat_ref or "").strip()
     if not cref:
         raise ValueError("群标识为空")
     if invite_code_from_link(cref):
-        resolved = await resolve_invite_ref(client, cref, log_label="成员检测")
+        resolved = await asyncio.wait_for(
+            resolve_invite_ref(client, cref, log_label="成员检测"),
+            timeout=GROUP_RESOLVE_TIMEOUT_SEC,
+        )
         if resolved and "@g.us" in resolved.lower():
             return parse_chat_ref_to_jid(resolved)
     for key in keys_for_chat_ref(cref):
@@ -58,7 +51,10 @@ async def _resolve_group_jid(client: NewAClient, chat_ref: str) -> JID:
         jid = jid_from_chat_key(key)
         if jid is not None:
             return jid
-    return await resolve_chat_jid(client, cref)
+    return await asyncio.wait_for(
+        resolve_chat_jid(client, cref),
+        timeout=GROUP_RESOLVE_TIMEOUT_SEC,
+    )
 
 
 def _clients_for_entry(
@@ -109,14 +105,23 @@ async def audit_address_book_watch_users(
     if not clients:
         return out
     primary = next(iter(clients.values()))
-    warmed: set[int] = set()
+    targets = [
+        e
+        for e in cfg.address_book
+        if e.listen_enabled and (e.watch_user or "").strip()
+    ]
+    total = len(targets)
+    info(f"成员检测开始：共 {total} 条监听绑定（单条超时约 {GROUP_INFO_TIMEOUT_SEC:g} 秒）")
+    done_listen = 0
     for ent in cfg.address_book:
         eid = ent.id
         if not ent.listen_enabled or not (ent.watch_user or "").strip():
             out[eid] = WatchAuditRow(eid, WatchAuditStatus.SKIP)
             continue
+        done_listen += 1
         owner = (ent.owner_account_id or "").strip()
         label = (ent.remark or ent.id).strip()
+        info(f"成员检测进度 {done_listen}/{total}：{label}")
         if owner and owner not in clients:
             row = WatchAuditRow(
                 eid,
@@ -126,11 +131,6 @@ async def audit_address_book_watch_users(
             out[eid] = row
             warning(f"成员检测「{label}」：{row.detail}")
             continue
-        preferred = clients.get(owner) if owner else primary
-        pid = id(preferred)
-        if pid not in warmed:
-            warmed.add(pid)
-            await _soft_wait_client_me(preferred)
         try:
             watch = parse_watch_user_input(ent.watch_user)
         except ValueError as exc:
@@ -142,6 +142,15 @@ async def audit_address_book_watch_users(
             group_jid, group_client = await _resolve_group_jid_with_fallback(
                 clients, primary, owner, ent.chat_ref
             )
+        except asyncio.TimeoutError:
+            row = WatchAuditRow(
+                eid,
+                WatchAuditStatus.ERROR,
+                f"群解析超时（{GROUP_RESOLVE_TIMEOUT_SEC:g} 秒）",
+            )
+            out[eid] = row
+            warning(f"成员检测「{label}」：{row.detail}")
+            continue
         except Exception as exc:
             row = WatchAuditRow(eid, WatchAuditStatus.ERROR, f"群解析失败：{exc}")
             out[eid] = row
@@ -149,6 +158,11 @@ async def audit_address_book_watch_users(
             continue
         try:
             found = await watch_user_in_group(group_client, group_jid, watch, label=label)
+        except TimeoutError as exc:
+            row = WatchAuditRow(eid, WatchAuditStatus.ERROR, str(exc))
+            out[eid] = row
+            warning(f"成员检测「{label}」：{row.detail}")
+            continue
         except Exception as exc:
             row = WatchAuditRow(eid, WatchAuditStatus.ERROR, f"读取群成员失败：{exc}")
             out[eid] = row
@@ -166,5 +180,6 @@ async def audit_address_book_watch_users(
             out[eid] = WatchAuditRow(eid, WatchAuditStatus.OK)
         else:
             out[eid] = WatchAuditRow(eid, WatchAuditStatus.ABSENT, watch)
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(0.15)
+    info("成员检测完成。")
     return out

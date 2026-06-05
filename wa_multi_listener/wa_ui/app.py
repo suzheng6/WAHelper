@@ -121,6 +121,7 @@ class WaPanel(ctk.CTkFrame):
         self._taskmgr_toggle_busy = False
         self._watch_audit_flags: Dict[str, str] = {}
         self._watch_audit_details: Dict[str, str] = {}
+        self._watch_audit_busy = False
 
         self.configure(fg_color=COLORS["bg"])
         self.grid_columnconfigure(1, weight=1)
@@ -1078,15 +1079,24 @@ class WaPanel(ctk.CTkFrame):
         return "", COLORS["border"]
 
     def _check_watch_memberships(self) -> None:
+        if getattr(self, "_watch_audit_busy", False):
+            info("成员检测进行中，请稍候…")
+            return
         if not self._coord or not self._coord.has_connected_clients():
             info("请先登录 WhatsApp 账号并点「保存并重载服务」后再检测。")
             return
+        self._watch_audit_busy = True
         info("正在检测各群监听用户是否在群内…")
 
         def on_done(result: Dict[str, WatchAuditRow]) -> None:
-            self.after(0, lambda: self._apply_watch_membership_audit(result))
+            def finish() -> None:
+                self._watch_audit_busy = False
+                self._apply_watch_membership_audit(result)
+
+            self.after(0, finish)
 
         if not self._coord.request_watch_membership_audit(self._cfg, on_done):
+            self._watch_audit_busy = False
             info("当前无在线账号，无法检测群成员。")
 
     def _apply_watch_membership_audit(self, result: Dict[str, WatchAuditRow]) -> None:

@@ -14,7 +14,10 @@ from logger_util import warning as log_warning
 
 
 def normalize_phone(raw: str) -> str:
-    return "".join(c for c in (raw or "") if c.isdigit())
+    if isinstance(raw, JID):
+        raw = getattr(raw, "User", "") or ""
+    s = str(raw or "")
+    return "".join(c for c in s if c.isdigit())
 
 
 def phones_equivalent(watch: str, sender_digits: str) -> bool:

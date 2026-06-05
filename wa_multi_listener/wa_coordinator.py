@@ -624,17 +624,12 @@ class WaCoordinator:
             return False
 
         async def _run_audit() -> Dict[str, WatchAuditRow]:
-            if self._listen_refresh_lock is None:
-                self._listen_refresh_lock = asyncio.Lock()
-            async with self._listen_refresh_lock:
-                for c in clients.values():
-                    await self._wait_client_me(c, 45.0)
-                return await audit_address_book_watch_users(cfg, clients)
+            return await audit_address_book_watch_users(cfg, clients)
 
         def worker() -> None:
             fut = asyncio.run_coroutine_threadsafe(_run_audit(), loop)
             try:
-                result = fut.result(timeout=900)
+                result = fut.result(timeout=420)
             except Exception as exc:
                 warning(f"群成员检测失败：{exc}")
                 result = {}
