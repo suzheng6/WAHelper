@@ -413,7 +413,7 @@ def _address_entry_from_dict(d: Dict[str, Any]) -> Optional[AddressEntry]:
 
 
 def _last_schedule_names_on_disk() -> Dict[str, str]:
-    """读取 config.json 中各通讯录条目的 last_schedule_source_name。"""
+    """读取 config.json 中各通讯录条目的 last_schedule_source_name（含空字符串）。"""
     with _lock:
         if not os.path.isfile(CONFIG_PATH):
             return {}
@@ -427,50 +427,50 @@ def _last_schedule_names_on_disk() -> Dict[str, str]:
         if not isinstance(row, dict):
             continue
         eid = str(row.get("id", "")).strip()
-        name = str(row.get("last_schedule_source_name", "") or "").strip()
-        if eid and name:
-            out[eid] = name
+        if not eid:
+            continue
+        out[eid] = str(row.get("last_schedule_source_name", "") or "").strip()
     return out
 
 
 def sync_last_schedule_from_disk(cfg: AppConfig) -> None:
     """从磁盘同步「上次任务文件名」到内存。"""
     disk = _last_schedule_names_on_disk()
-    if not disk:
-        return
     for ent in cfg.address_book:
-        name = disk.get(ent.id, "")
-        if name:
-            ent.last_schedule_source_name = name
+        ent.last_schedule_source_name = disk.get(ent.id, "")
 
 
 def merge_last_schedule_from_disk(cfg: AppConfig) -> None:
-    """保存前合并：内存为空时才采用磁盘上的值。"""
-    disk = _last_schedule_names_on_disk()
-    if not disk:
-        return
-    for ent in cfg.address_book:
-        if (ent.last_schedule_source_name or "").strip():
-            continue
-        name = disk.get(ent.id, "")
-        if name:
-            ent.last_schedule_source_name = name
+    """已弃用：保存时以内存为准，避免清空「上次任务」时被磁盘旧值回填。"""
+    return
 
 
 def apply_last_schedule_from_current_jobs(cfg: AppConfig) -> bool:
     """按任务管理当前列表刷新「上次任务文件名」：有任务→文件名；无任务→空。
 
-    删除全部任务时不调用，保留上次记录供选群；添加任务后调用，未加任务的群记为空。
+    仅在添加任务或用户点「从任务管理同步上次任务」时调用；删除任务不调用。
     """
     from .scheduler import load_jobs
 
     job_map: Dict[str, str] = {}
     for j in load_jobs():
         name = (getattr(j, "source_name", None) or "").strip()
-        for eid in getattr(j, "chat_entry_ids", None) or []:
-            s = str(eid).strip()
-            if s:
-                job_map[s] = name
+        entry_ids = [str(x).strip() for x in (getattr(j, "chat_entry_ids", None) or []) if str(x).strip()]
+        if entry_ids:
+            for eid in entry_ids:
+                job_map[eid] = name
+            continue
+        for cid in getattr(j, "chat_ids", None) or []:
+            try:
+                cid_int = int(cid)
+            except (TypeError, ValueError):
+                continue
+            for ent in cfg.address_book:
+                n = chat_ref_to_optional_int(ent.chat_ref)
+                if n is None:
+                    continue
+                if set(chat_peer_ids_for_match(n)).intersection(chat_peer_ids_for_match(cid_int)):
+                    job_map[ent.id] = name
 
     changed = False
     for ent in cfg.address_book:
@@ -592,7 +592,6 @@ def load_config() -> AppConfig:
 
 def save_config(cfg: AppConfig) -> None:
     ensure_dirs()
-    merge_last_schedule_from_disk(cfg)
     data: Dict[str, Any] = {
         "api_id": int(cfg.api_id),
         "api_hash": str(cfg.api_hash or ""),

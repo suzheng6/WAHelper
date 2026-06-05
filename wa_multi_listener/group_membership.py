@@ -66,6 +66,7 @@ async def resolve_watch_user_keys_in_group(
     watch_phone: str,
     *,
     label: str = "",
+    quiet: bool = False,
 ) -> Set[str]:
     """从群成员表查找监听目标，返回其 JID/LID 匹配键（比实时 LID 解析更可靠）。"""
     tag = label or jid_to_key(group_jid)
@@ -73,7 +74,8 @@ async def resolve_watch_user_keys_in_group(
     try:
         gi = await client.get_group_info(group_jid)
     except Exception as exc:
-        warning(f"群「{tag}」：读取成员失败，无法锁定监听用户 {watch_phone}（{exc}）")
+        if not quiet:
+            warning(f"群「{tag}」：读取成员失败，无法锁定监听用户 {watch_phone}（{exc}）")
         return keys
 
     for p in _iter_participants(gi):
@@ -87,17 +89,32 @@ async def resolve_watch_user_keys_in_group(
         if jid_nonempty(p.LID):
             keys.update(keys_for_match(p.LID))
             parts.append(jid_to_key(p.LID))
-        info(
-            f"群「{tag}」：成员表已锁定监听用户 {watch_phone} → "
-            + " / ".join(parts)
-        )
+        if not quiet:
+            info(
+                f"群「{tag}」：成员表已锁定监听用户 {watch_phone} → "
+                + " / ".join(parts)
+            )
         return keys
 
-    warning(
-        f"群「{tag}」：成员表中未找到 {watch_phone}（共 {len(_iter_participants(gi))} 人）。"
-        "请确认号码含国家码；仍将尝试按消息发送者 JID 匹配。"
-    )
+    if not quiet:
+        warning(
+            f"群「{tag}」：成员表中未找到 {watch_phone}（共 {len(_iter_participants(gi))} 人）。"
+            "请确认号码含国家码；仍将尝试按消息发送者 JID 匹配。"
+        )
     return keys
+
+
+async def watch_user_in_group(
+    client: "NewAClient",
+    group_jid: JID,
+    watch_phone: str,
+    *,
+    label: str = "",
+) -> bool:
+    keys = await resolve_watch_user_keys_in_group(
+        client, group_jid, watch_phone, label=label, quiet=True
+    )
+    return bool(keys)
 
 
 def extra_group_chat_keys(gi) -> Set[str]:

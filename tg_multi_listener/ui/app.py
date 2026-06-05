@@ -90,6 +90,7 @@ from ..session_check import is_session_authorized_sync
 from ..stats import record_alert, today_alert_count
 from ..telethon_auth import run_login_in_thread
 from ..telethon_coordinator import DEFAULT_JOIN_TIMEOUT, TelethonCoordinator
+from ..watch_membership_audit import WatchAuditRow, WatchAuditStatus
 from .address_edit_dialog import AddressEditDialog
 from .theme import COLORS, SIDEBAR_WIDTH
 
@@ -147,6 +148,7 @@ class MainWindow(ctk.CTkFrame):
         self._log_ui_queue: queue.SimpleQueue[str] = queue.SimpleQueue()
         self._log_ui_pump_on = True
         self._current_nav: NavId = "dash"
+        self._watch_audit_flags: Dict[str, str] = {}
 
         if not embedded:
             root = master if isinstance(master, ctk.CTk) else master.winfo_toplevel()
@@ -1256,7 +1258,22 @@ class MainWindow(ctk.CTkFrame):
         listen_txt = "监听 ✓" if ent.listen_enabled else "仅定时"
         user_txt = ent.watch_user.strip() or "—"
         owner_txt = (ent.owner_account_id or "").strip() or "未选择"
-        return f"群 {ent.chat_ref}  ·  用户 {user_txt}  ·  主号→{owner_txt}  ·  {listen_txt}"
+        base = f"群 {ent.chat_ref}  ·  用户 {user_txt}  ·  主号→{owner_txt}  ·  {listen_txt}"
+        extra, _ = self._watch_audit_display(ent)
+        return base + extra
+
+    def _watch_audit_display(self, ent: AddressEntry) -> Tuple[str, str]:
+        st = self._watch_audit_flags.get(ent.id, "")
+        if st == WatchAuditStatus.ABSENT.value:
+            return (
+                "  ·  ⚠ 用户不在群内，建议清空监听用户或删除条目",
+                COLORS["danger"],
+            )
+        if st == WatchAuditStatus.ERROR.value:
+            return ("  ·  ⚠ 未能检测", COLORS["border"])
+        if st == WatchAuditStatus.OFFLINE.value:
+            return ("  ·  ⚠ 归属账号未在线", COLORS["border"])
+        return "", COLORS["border"]
 
     def _address_book_ids(self) -> List[str]:
         return [e.id for e in self._cfg.address_book]
@@ -1269,13 +1286,25 @@ class MainWindow(ctk.CTkFrame):
             ent.watch_user,
             ent.listen_enabled,
             ent.owner_account_id,
+            self._watch_audit_flags.get(ent.id, ""),
             i > 0,
             i < n_book - 1,
         )
 
     def _patch_group_row_widget(self, i: int, ent: AddressEntry, w: Dict[str, Any], n_book: int) -> None:
-        w["title"].configure(text=f"{i + 1}. {ent.remark.strip() or ent.id}")
-        w["summary"].configure(text=self._group_row_summary(ent))
+        title_txt = f"{i + 1}. {ent.remark.strip() or ent.id}"
+        extra, border = self._watch_audit_display(ent)
+        if self._watch_audit_flags.get(ent.id) == WatchAuditStatus.ABSENT.value:
+            title_txt += "  ⚠不在群"
+        w["title"].configure(
+            text=title_txt,
+            text_color=COLORS["danger"] if extra else COLORS["text"],
+        )
+        w["summary"].configure(
+            text=self._group_row_summary(ent),
+            text_color=COLORS["danger"] if extra else COLORS["muted"],
+        )
+        w["row"].configure(border_color=border)
         w["up_btn"].configure(state="normal" if i > 0 else "disabled")
         w["down_btn"].configure(state="normal" if i < n_book - 1 else "disabled")
 
@@ -1325,21 +1354,25 @@ class MainWindow(ctk.CTkFrame):
         title_font, summary_font = self._grp_list_fonts()
         n_book = len(self._cfg.address_book)
         for i, ent in enumerate(self._cfg.address_book):
+            extra, border_color = self._watch_audit_display(ent)
             row = ctk.CTkFrame(
                 self._grp_rows,
                 fg_color=COLORS["card"],
                 corner_radius=10,
                 border_width=1,
-                border_color=COLORS["border"],
+                border_color=border_color,
             )
             row.pack(fill="x", pady=3)
             head = ctk.CTkFrame(row, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(8, 0))
+            title_txt = f"{i + 1}. {ent.remark.strip() or ent.id}"
+            if self._watch_audit_flags.get(ent.id) == WatchAuditStatus.ABSENT.value:
+                title_txt += "  ⚠不在群"
             title_lb = ctk.CTkLabel(
                 head,
-                text=f"{i + 1}. {ent.remark.strip() or ent.id}",
+                text=title_txt,
                 font=title_font,
-                text_color=COLORS["text"],
+                text_color=COLORS["danger"] if extra else COLORS["text"],
                 anchor="w",
             )
             title_lb.pack(side="left", fill="x", expand=True)
@@ -1379,7 +1412,7 @@ class MainWindow(ctk.CTkFrame):
                 row,
                 text=self._group_row_summary(ent),
                 font=summary_font,
-                text_color=COLORS["muted"],
+                text_color=COLORS["danger"] if extra else COLORS["muted"],
                 justify="left",
                 anchor="w",
                 wraplength=640,
@@ -1563,7 +1596,7 @@ class MainWindow(ctk.CTkFrame):
             owner = (ent.owner_account_id or "").strip()
             own_hint = f" · 主号→{owner}" if owner else ""
             last_fn = (getattr(ent, "last_schedule_source_name", "") or "").strip()
-            last_hint = f" · 上次任务→{last_fn}" if last_fn else ""
+            last_hint = f" · 上次任务→{last_fn}" if last_fn else " · 上次任务→为空"
             disp = f"{ent.remark.strip() or ent.id}{own_hint}   （{ent.chat_ref}{last_hint}）"
             ctk.CTkCheckBox(
                 self._sched_targets,
@@ -1606,8 +1639,8 @@ class MainWindow(ctk.CTkFrame):
         sync_box.pack(fill="x", pady=(12, 0))
         ctk.CTkLabel(
             sync_box,
-            text="按「任务管理」当前任务列表，更新「定时任务」勾选目标后的「上次任务→」标记："
-            "有任务的群写入对应文档名，无任务的群清空。",
+            text="「上次任务→」在添加文档任务时自动更新；删除任务管理卡片不会改动。"
+            "需要与当前任务列表对齐时，点下方按钮手动同步（有任务写入文档名，无任务显示为空）。",
             text_color=COLORS["muted"],
             wraplength=640,
             justify="left",
@@ -1619,8 +1652,53 @@ class MainWindow(ctk.CTkFrame):
             hover_color="#3d7ae6",
             command=self._sync_last_schedule_from_jobs,
         ).pack(fill="x", padx=14, pady=(0, 14))
+
+        audit_box = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        audit_box.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(
+            audit_box,
+            text="检测所有「参与监听」的群：若监听用户已不在成员列表中，会在「通讯录」对应条目标红提示，便于清理。",
+            text_color=COLORS["muted"],
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+        ctk.CTkButton(
+            audit_box,
+            text="检测不在群内的监听用户",
+            fg_color=COLORS["accent"],
+            hover_color="#3d7ae6",
+            command=self._check_watch_memberships,
+        ).pack(fill="x", padx=14, pady=(0, 14))
         finish_scroll()
         return page
+
+    def _check_watch_memberships(self) -> None:
+        if not self._coord or not self._coord.has_connected_clients():
+            info("请先登录 Telegram 账号并点「保存并重载服务」后再检测。")
+            return
+        info("正在检测各群监听用户是否在群内…")
+
+        def on_done(result: Dict[str, WatchAuditRow]) -> None:
+            self.after(0, lambda: self._apply_watch_membership_audit(result))
+
+        if not self._coord.request_watch_membership_audit(self._cfg, on_done):
+            info("当前无在线账号，无法检测群成员。")
+
+    def _apply_watch_membership_audit(self, result: Dict[str, WatchAuditRow]) -> None:
+        self._watch_audit_flags = {eid: row.status.value for eid, row in result.items()}
+        ok = sum(1 for r in result.values() if r.status == WatchAuditStatus.OK)
+        absent = sum(1 for r in result.values() if r.status == WatchAuditStatus.ABSENT)
+        err = sum(1 for r in result.values() if r.status == WatchAuditStatus.ERROR)
+        offline = sum(1 for r in result.values() if r.status == WatchAuditStatus.OFFLINE)
+        self._render_group_rows(force=True)
+        parts = [f"已检测 {ok + absent} 条监听绑定"]
+        if absent:
+            parts.append(f"{absent} 条用户不在群内（通讯录已标红）")
+        if err:
+            parts.append(f"{err} 条检测失败")
+        if offline:
+            parts.append(f"{offline} 条归属账号未在线")
+        info("；".join(parts) + "。请到「通讯录」查看。")
 
     def _sync_last_schedule_from_jobs(self) -> None:
         before = {e.id: (e.last_schedule_source_name or "").strip() for e in self._cfg.address_book}

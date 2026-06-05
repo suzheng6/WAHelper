@@ -10,7 +10,7 @@ import threading
 
 import time
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
 
@@ -22,6 +22,7 @@ from config import Account, AppConfig, save_config
 from invite_resolve import resolve_invite_ref
 from listener import ListenerController, resolve_listen_rules, warm_invite_cache
 from wa_jid import invite_code_from_link, jid_nonempty
+from watch_membership_audit import WatchAuditRow, audit_address_book_watch_users
 
 from logger_util import error, info, warning
 
@@ -611,4 +612,31 @@ class WaCoordinator:
                 self._listener._running = False  # noqa: SLF001
                 self._schedule2._running = False  # noqa: SLF001
 
+    def request_watch_membership_audit(
+        self,
+        cfg: AppConfig,
+        on_done: Callable[[Dict[str, WatchAuditRow]], None],
+    ) -> bool:
+        loop = self._loop
+        with self._lock:
+            clients = dict(self._clients)
+        if loop is None or not loop.is_running() or not clients:
+            return False
+
+        def worker() -> None:
+            fut = asyncio.run_coroutine_threadsafe(
+                audit_address_book_watch_users(cfg, clients), loop
+            )
+            try:
+                result = fut.result(timeout=600)
+            except Exception as exc:
+                warning(f"群成员检测失败：{exc}")
+                result = {}
+            try:
+                on_done(result)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="wa-watch-audit", daemon=True).start()
+        return True
 

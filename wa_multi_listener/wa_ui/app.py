@@ -49,6 +49,7 @@ from schedule2_runner import (
     schedule2_job_target_remarks,
 )
 from session_check import has_saved_session
+from watch_membership_audit import WatchAuditRow, WatchAuditStatus
 from wa_ui.qr_dialog import QrLoginDialog
 from wa_ui.card_grid import TASKMGR_COLS, configure_equal_columns, grid_place
 from wa_ui.taskmgr_tile_theme import (
@@ -118,6 +119,7 @@ class WaPanel(ctk.CTkFrame):
         self._taskmgr_listed_ids: List[str] = []
         self._taskmgr_fp_cache: Dict[str, tuple] = {}
         self._taskmgr_toggle_busy = False
+        self._watch_audit_flags: Dict[str, str] = {}
 
         self.configure(fg_color=COLORS["bg"])
         self.grid_columnconfigure(1, weight=1)
@@ -707,34 +709,14 @@ class WaPanel(ctk.CTkFrame):
         ctk.CTkLabel(header, text="通讯录", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(anchor="w", pady=(8, 4))
         ctk.CTkLabel(
             header,
-            text="群可填邀请链接或 @g.us；请为每个群选择主号/归属账号。监听用户填手机号（含国家码）。↑↓ 调整顺序。",
+            text="底部填写后点「添加」；列表内可改备注/归属、↑↓ 调序。群填邀请链接或 @g.us；监听填手机号（含国家码），仅定时可留空。",
             text_color=COLORS["muted"],
-            wraplength=700,
+            wraplength=680,
             justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-        form = ctk.CTkFrame(header, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
-        form.pack(fill="x", pady=(0, 8))
-        self._ab_remark = ctk.CTkEntry(form, placeholder_text="备注")
-        self._ab_chat = ctk.CTkEntry(form, placeholder_text="群 JID 或邀请链接")
-        self._ab_user = ctk.CTkEntry(form, placeholder_text="监听用户手机号")
-        own_row = ctk.CTkFrame(form, fg_color="transparent")
-        own_row.pack(fill="x", padx=12, pady=6)
-        ctk.CTkLabel(own_row, text="主号/归属账号（必选）", text_color=COLORS["muted"]).pack(side="left", padx=(0, 8))
-        acc_own = self._owner_account_values()
-        self._ab_owner = ctk.CTkComboBox(own_row, width=180, values=acc_own or ["—"])
-        self._ab_owner.pack(side="left", fill="x", expand=True)
-        if acc_own:
-            self._ab_owner.set(acc_own[0])
-        else:
-            self._ab_owner.set("—")
-        for w in (self._ab_remark, self._ab_chat, self._ab_user):
-            w.pack(fill="x", padx=12, pady=6)
-        self._ab_listen = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(form, text="参与监听", variable=self._ab_listen, text_color=COLORS["text"]).pack(anchor="w", padx=12, pady=4)
-        ctk.CTkButton(form, text="添加到通讯录", fg_color=COLORS["accent"], command=self._add_address).pack(fill="x", padx=12, pady=12)
+        ).pack(anchor="w", pady=(0, 6))
 
         list_host = ctk.CTkFrame(page, fg_color="transparent")
-        list_host.grid(row=1, column=0, sticky="nsew")
+        list_host.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
         list_card = ctk.CTkFrame(list_host, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
         list_card.pack(fill="both", expand=True)
         ctk.CTkLabel(list_card, text="通讯录列表", text_color=COLORS["muted"]).pack(anchor="w", padx=12, pady=(10, 4))
@@ -747,6 +729,52 @@ class WaPanel(ctk.CTkFrame):
         self._ab_scroll_bound = False
         self._render_address()
         finish_list()
+
+        addr_foot = ctk.CTkFrame(page, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        addr_foot.grid(row=2, column=0, sticky="ew")
+        form = ctk.CTkFrame(addr_foot, fg_color="transparent")
+        form.pack(fill="x", padx=10, pady=8)
+
+        def _addr_field_row(label: str, placeholder: str) -> ctk.CTkEntry:
+            row = ctk.CTkFrame(form, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text=label, text_color=COLORS["muted"], width=52, anchor="w").pack(side="left", padx=(0, 6))
+            ent = ctk.CTkEntry(row, placeholder_text=placeholder, height=28)
+            ent.pack(side="left", fill="x", expand=True)
+            return ent
+
+        self._ab_remark = _addr_field_row("备注", "显示名")
+        self._ab_chat = _addr_field_row("群", "JID 或邀请链接")
+        self._ab_user = _addr_field_row("用户", "手机号，可不填")
+
+        action = ctk.CTkFrame(form, fg_color="transparent")
+        action.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(action, text="归属", text_color=COLORS["muted"], width=52, anchor="w").pack(side="left", padx=(0, 6))
+        acc_own = self._owner_account_values()
+        self._ab_owner = ctk.CTkComboBox(action, width=88, height=28, values=acc_own or ["—"])
+        self._ab_owner.pack(side="left", padx=(0, 8))
+        if acc_own:
+            self._ab_owner.set(acc_own[0])
+        else:
+            self._ab_owner.set("—")
+        self._ab_listen = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(
+            action,
+            text="监听",
+            variable=self._ab_listen,
+            text_color=COLORS["text"],
+            width=56,
+            checkbox_height=18,
+            checkbox_width=18,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            action,
+            text="添加",
+            width=64,
+            height=28,
+            fg_color=COLORS["accent"],
+            command=self._add_address,
+        ).pack(side="left")
         return page
 
     def _owner_account_values(self) -> List[str]:
@@ -814,17 +842,27 @@ class WaPanel(ctk.CTkFrame):
         acc_vals = self._owner_account_values()
         n_book = len(self._cfg.address_book)
         for i, ent in enumerate(self._cfg.address_book):
-            row = ctk.CTkFrame(self._ab_rows, fg_color=COLORS["card"], corner_radius=10, border_width=1, border_color=COLORS["border"])
+            audit_extra, border_color = self._watch_audit_display(ent)
+            row = ctk.CTkFrame(
+                self._ab_rows,
+                fg_color=COLORS["card"],
+                corner_radius=10,
+                border_width=1,
+                border_color=border_color,
+            )
             row.pack(fill="x", pady=4)
             tag = "监听" if ent.listen_enabled else "仅定时"
             owner_txt = (ent.owner_account_id or "").strip() or "未选择"
             head = ctk.CTkFrame(row, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(8, 0))
+            title_txt = f"{i + 1}. {ent.remark or ent.id}"
+            if self._watch_audit_flags.get(ent.id) == WatchAuditStatus.ABSENT.value:
+                title_txt += "  ⚠不在群"
             ctk.CTkLabel(
                 head,
-                text=f"{i + 1}. {ent.remark or ent.id}",
+                text=title_txt,
                 font=ctk.CTkFont(size=14, weight="bold"),
-                text_color=COLORS["text"],
+                text_color=COLORS["danger"] if audit_extra else COLORS["text"],
             ).pack(side="left")
             order_btns = ctk.CTkFrame(head, fg_color="transparent")
             order_btns.pack(side="right")
@@ -848,8 +886,8 @@ class WaPanel(ctk.CTkFrame):
             ).pack(side="left")
             ctk.CTkLabel(
                 row,
-                text=f"{tag}\n群: {ent.chat_ref}\n用户: {ent.watch_user or '—'} · 主号→{owner_txt}",
-                text_color=COLORS["text"],
+                text=f"{tag}\n群: {ent.chat_ref}\n用户: {ent.watch_user or '—'} · 主号→{owner_txt}{audit_extra}",
+                text_color=COLORS["danger"] if audit_extra else COLORS["text"],
                 justify="left",
             ).pack(anchor="w", padx=12, pady=(10, 4))
             ctrl = ctk.CTkFrame(row, fg_color="transparent")
@@ -991,8 +1029,8 @@ class WaPanel(ctk.CTkFrame):
         sync_box.pack(fill="x", pady=(12, 0))
         ctk.CTkLabel(
             sync_box,
-            text="按「任务管理」当前任务列表，更新「定时任务」勾选目标后的「上次任务→」标记："
-            "有任务的群写入对应 TXT 文件名，无任务的群清空。",
+            text="「上次任务→」在添加定时任务时自动更新；删除任务管理卡片不会改动。"
+            "需要与当前任务列表对齐时，点下方按钮手动同步（有任务写入文件名，无任务显示为空）。",
             text_color=COLORS["muted"],
             wraplength=640,
             justify="left",
@@ -1004,7 +1042,66 @@ class WaPanel(ctk.CTkFrame):
             hover_color="#1da851",
             command=self._sync_last_schedule_from_jobs,
         ).pack(fill="x", padx=14, pady=(0, 14))
+
+        audit_box = ctk.CTkFrame(wrap, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
+        audit_box.pack(fill="x", pady=(12, 0))
+        ctk.CTkLabel(
+            audit_box,
+            text="检测所有「参与监听」的群：若监听用户已不在成员列表中，会在「通讯录」对应条目标红提示，便于清理。",
+            text_color=COLORS["muted"],
+            wraplength=640,
+            justify="left",
+        ).pack(anchor="w", padx=14, pady=(12, 8))
+        ctk.CTkButton(
+            audit_box,
+            text="检测不在群内的监听用户",
+            fg_color=COLORS["accent"],
+            hover_color="#1da851",
+            command=self._check_watch_memberships,
+        ).pack(fill="x", padx=14, pady=(0, 14))
         return page
+
+    def _watch_audit_display(self, ent: AddressEntry) -> Tuple[str, str]:
+        st = self._watch_audit_flags.get(ent.id, "")
+        if st == WatchAuditStatus.ABSENT.value:
+            return (
+                "\n⚠ 用户不在群内，建议清空监听用户或删除条目",
+                COLORS["danger"],
+            )
+        if st == WatchAuditStatus.ERROR.value:
+            return ("\n⚠ 未能检测（群或用户解析失败）", COLORS["border"])
+        if st == WatchAuditStatus.OFFLINE.value:
+            return ("\n⚠ 归属账号未在线，未检测", COLORS["border"])
+        return "", COLORS["border"]
+
+    def _check_watch_memberships(self) -> None:
+        if not self._coord or not self._coord.has_connected_clients():
+            info("请先登录 WhatsApp 账号并点「保存并重载服务」后再检测。")
+            return
+        info("正在检测各群监听用户是否在群内…")
+
+        def on_done(result: Dict[str, WatchAuditRow]) -> None:
+            self.after(0, lambda: self._apply_watch_membership_audit(result))
+
+        if not self._coord.request_watch_membership_audit(self._cfg, on_done):
+            info("当前无在线账号，无法检测群成员。")
+
+    def _apply_watch_membership_audit(self, result: Dict[str, WatchAuditRow]) -> None:
+        flags: Dict[str, str] = {eid: row.status.value for eid, row in result.items()}
+        ok = sum(1 for r in result.values() if r.status == WatchAuditStatus.OK)
+        absent = sum(1 for r in result.values() if r.status == WatchAuditStatus.ABSENT)
+        err = sum(1 for r in result.values() if r.status == WatchAuditStatus.ERROR)
+        offline = sum(1 for r in result.values() if r.status == WatchAuditStatus.OFFLINE)
+        self._watch_audit_flags = flags
+        self._render_address()
+        parts = [f"已检测 {ok + absent} 条监听绑定"]
+        if absent:
+            parts.append(f"{absent} 条用户不在群内（通讯录已标红）")
+        if err:
+            parts.append(f"{err} 条检测失败")
+        if offline:
+            parts.append(f"{offline} 条归属账号未在线")
+        info("；".join(parts) + "。请到「通讯录」查看。")
 
     def _sync_last_schedule_from_jobs(self) -> None:
         from schedule2_runner import load_schedule2_jobs
@@ -1475,7 +1572,7 @@ class WaPanel(ctk.CTkFrame):
             cref = ent.chat_ref
             cref_disp = f"{cref[:48]}…" if len(cref) > 48 else cref
             last_fn = (getattr(ent, "last_schedule_source_name", "") or "").strip()
-            last_hint = f" · 上次任务→{last_fn}" if last_fn else ""
+            last_hint = f" · 上次任务→{last_fn}" if last_fn else " · 上次任务→为空"
             disp = f"{ent.remark}（{cref_disp}{last_hint}）"
             ctk.CTkCheckBox(self._s2_targets, text=disp, variable=v, text_color=COLORS["text"]).pack(anchor="w", padx=4, pady=2)
 

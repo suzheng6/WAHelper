@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from telethon import TelegramClient
 from telethon.errors import RPCError
@@ -18,6 +18,7 @@ from .listener import (
 )
 from .logger_util import error, info, warning
 from .scheduler import ScheduleRunner, load_jobs
+from .watch_membership_audit import WatchAuditRow, audit_address_book_watch_users
 
 # 与登录前停服务一致：重载/关闭须等旧 asyncio 线程退出，避免双 loop 共用 client 导致发送失败与重复重试。
 DEFAULT_JOIN_TIMEOUT = 28.0
@@ -75,6 +76,33 @@ class TelethonCoordinator:
             info(f"通讯录已更新：已解析 {len(rules)} 条监听绑定并立即生效")
         else:
             warning("通讯录已更新，但未能解析任何「参与监听」的群/用户绑定")
+
+    def request_watch_membership_audit(
+        self,
+        cfg: AppConfig,
+        on_done: Callable[[Dict[str, WatchAuditRow]], None],
+    ) -> bool:
+        loop = self._loop
+        clients = dict(self._clients_by_id)
+        if loop is None or not loop.is_running() or not clients:
+            return False
+
+        def worker() -> None:
+            fut = asyncio.run_coroutine_threadsafe(
+                audit_address_book_watch_users(cfg, clients), loop
+            )
+            try:
+                result = fut.result(timeout=600)
+            except Exception as exc:
+                warning(f"群成员检测失败：{exc}")
+                result = {}
+            try:
+                on_done(result)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, name="tg-watch-audit", daemon=True).start()
+        return True
 
     def _session_threads(self) -> List[threading.Thread]:
         out: List[threading.Thread] = []
