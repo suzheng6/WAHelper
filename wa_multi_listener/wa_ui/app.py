@@ -1111,6 +1111,13 @@ class WaPanel(ctk.CTkFrame):
             parts.append(f"{absent} 条用户不在群内（通讯录已标红）")
         if err:
             parts.append(f"{err} 条检测失败")
+            sample = [
+                (ent.remark or ent.id, details.get(ent.id, ""))
+                for ent in self._cfg.address_book
+                if flags.get(ent.id) == WatchAuditStatus.ERROR.value and details.get(ent.id)
+            ][:3]
+            for name, det in sample:
+                info(f"  失败示例：{name} → {det}")
         if offline:
             parts.append(f"{offline} 条归属账号未在线")
         info("；".join(parts) + "。请到「通讯录」查看。")
