@@ -1154,31 +1154,16 @@ class MainWindow(ctk.CTkFrame):
 
         header = ctk.CTkFrame(page, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew")
-        intro_grp = ctk.CTkLabel(
-            header,
-            text="填写「备注、群、监听用户」后点底部「添加到通讯录」。"
-            "列表为只读摘要，点「编辑」修改详情；↑↓ 调整顺序。监听生效请点侧栏「保存并重载服务」。",
-            text_color=COLORS["muted"],
-            wraplength=520,
-            justify="left",
-        )
         ctk.CTkLabel(header, text="通讯录（群与用户）", font=ctk.CTkFont(size=22, weight="bold"), text_color=COLORS["text"]).pack(
             anchor="w", pady=(8, 4)
         )
-        intro_grp.pack(anchor="w", pady=(0, 6))
-        hint = ctk.CTkFrame(header, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
-        hint.pack(fill="x", pady=(0, 8))
-        ctk.CTkLabel(hint, text="填写说明", font=ctk.CTkFont(size=13, weight="bold"), text_color=COLORS["text"]).pack(
-            anchor="w", padx=14, pady=(10, 4)
-        )
-        gid_lbl = ctk.CTkLabel(
-            hint,
-            text="群：-100… ID、@群名或 t.me 链接。参与监听须填用户；仅定时群发可取消勾选并留空用户。",
+        ctk.CTkLabel(
+            header,
+            text="底部填写后点「添加」；列表点「编辑」改详情、↑↓ 调序。群：-100… ID、@群名或 t.me；监听须填用户，仅定时可留空。生效请侧栏「保存并重载服务」。",
             text_color=COLORS["muted"],
+            wraplength=680,
             justify="left",
-            wraplength=520,
-        )
-        gid_lbl.pack(anchor="w", padx=14, pady=(0, 10))
+        ).pack(anchor="w", pady=(0, 6))
 
         list_host = ctk.CTkFrame(page, fg_color="transparent")
         list_host.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
@@ -1198,30 +1183,56 @@ class MainWindow(ctk.CTkFrame):
         grp_foot = ctk.CTkFrame(page, fg_color=COLORS["card"], corner_radius=12, border_width=1, border_color=COLORS["border"])
         grp_foot.grid(row=2, column=0, sticky="ew")
         form = ctk.CTkFrame(grp_foot, fg_color="transparent")
-        form.pack(fill="x", padx=12, pady=10)
-        ctk.CTkLabel(form, text="备注（显示名）", text_color=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
-        self._addr_remark = ctk.CTkEntry(form, placeholder_text="如：客户群A")
-        self._addr_remark.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(form, text="群", text_color=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
-        self._addr_chat = ctk.CTkEntry(form, placeholder_text="数字 ID / @群名 / t.me 链接")
-        self._addr_chat.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(form, text="监听用户（不参与监听可留空）", text_color=COLORS["muted"]).pack(anchor="w", pady=(0, 4))
-        self._addr_user = ctk.CTkEntry(form, placeholder_text="数字 ID 或 @用户名")
-        self._addr_user.pack(fill="x", pady=(0, 6))
-        own_row = ctk.CTkFrame(form, fg_color="transparent")
-        own_row.pack(fill="x", pady=(0, 6))
-        ctk.CTkLabel(own_row, text="归属账号（必选）", text_color=COLORS["muted"]).pack(side="left", padx=(0, 8))
+        form.pack(fill="x", padx=10, pady=8)
+
+        def _addr_field_row(label: str, placeholder: str) -> ctk.CTkEntry:
+            row = ctk.CTkFrame(form, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text=label, text_color=COLORS["muted"], width=52, anchor="w").pack(side="left", padx=(0, 6))
+            ent = ctk.CTkEntry(row, placeholder_text=placeholder, height=28)
+            ent.pack(side="left", fill="x", expand=True)
+            return ent
+
+        self._addr_remark = _addr_field_row("备注", "显示名")
+        self._addr_chat = _addr_field_row("群", "ID / @群名 / t.me")
+        self._addr_user = _addr_field_row("用户", "ID 或 @用户名，可不填")
+
+        action = ctk.CTkFrame(form, fg_color="transparent")
+        action.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(action, text="归属", text_color=COLORS["muted"], width=52, anchor="w").pack(side="left", padx=(0, 6))
         acc_own = self._owner_account_values()
-        if not acc_own:
-            ctk.CTkLabel(own_row, text="请先在账号管理添加账号", text_color=COLORS["danger"]).pack(side="left")
-        self._addr_owner = ctk.CTkComboBox(own_row, width=160, values=acc_own or ["—"])
-        self._addr_owner.pack(side="left")
+        self._addr_owner = ctk.CTkComboBox(action, width=88, height=28, values=acc_own or ["—"])
+        self._addr_owner.pack(side="left", padx=(0, 8))
         if acc_own:
             self._addr_owner.set(acc_own[0])
+        elif not acc_own:
+            self._addr_owner.set("—")
         self._addr_listen = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(form, text="参与监听", variable=self._addr_listen, text_color=COLORS["text"]).pack(anchor="w", pady=(0, 8))
-        ctk.CTkButton(form, text="添加到通讯录", fg_color=COLORS["accent"], command=self._add_address_entry).pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(form, text="保存通讯录", fg_color=COLORS["border"], command=self._save_address_book).pack(fill="x")
+        ctk.CTkCheckBox(
+            action,
+            text="监听",
+            variable=self._addr_listen,
+            text_color=COLORS["text"],
+            width=56,
+            checkbox_height=18,
+            checkbox_width=18,
+        ).pack(side="left", padx=(0, 8))
+        ctk.CTkButton(
+            action,
+            text="添加",
+            width=64,
+            height=28,
+            fg_color=COLORS["accent"],
+            command=self._add_address_entry,
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkButton(
+            action,
+            text="保存",
+            width=64,
+            height=28,
+            fg_color=COLORS["border"],
+            command=self._save_address_book,
+        ).pack(side="left")
         return page
 
     def _commit_address_book(self, *, resolve_online: bool = True) -> None:
