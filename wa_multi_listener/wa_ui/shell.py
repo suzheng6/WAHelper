@@ -27,13 +27,14 @@ from wa_ui.app import WaPanel
 from wa_ui.theme import COLORS
 
 MAIN_GEOMETRY = "1180x760"
+APP_VERSION = "v2.0.1"
 _AI_ROOT = _pkg_root.parent
 
 
 class MessengerShell(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("超群小帮手 · WhatsApp + Telegram")
+        self.title(f"超群小帮手 {APP_VERSION} · WhatsApp + Telegram")
         self.geometry(MAIN_GEOMETRY)
         self.resizable(False, False)
         self.configure(fg_color=COLORS["bg"])

@@ -22,6 +22,7 @@ if str(_pkg_root) not in sys.path:
 from config import (
     Account,
     AddressEntry,
+    apply_last_schedule_for_jobs,
     apply_last_schedule_from_current_jobs,
     format_job_targets_label,
     load_config,
@@ -37,12 +38,22 @@ from stats import record_alert, today_alert_count
 from paths import app_root, resource_path
 from schedule_txt_import import import_doc_items
 from schedule_account import mark_row_primary_auto, row_needs_per_group_owner
+from schedule_folder import (
+    can_advance_folder_day,
+    format_folder_advance_line,
+    folder_txt_abs_path,
+    is_folder_job,
+    scan_schedule_folder,
+    taskmgr_job_file_label,
+)
 from schedule2_runner import (
     Schedule2Job,
     Schedule2Row,
     Schedule2Runner,
+    advance_schedule2_folder_day,
     load_schedule2_jobs,
     save_schedule2_jobs,
+    save_schedule2_jobs_patch,
     schedule2_job_is_running,
     schedule2_job_status_label,
     schedule2_job_step_label,
@@ -51,12 +62,13 @@ from schedule2_runner import (
 from session_check import has_saved_session
 from watch_membership_audit import WatchAuditRow, WatchAuditStatus
 from wa_ui.qr_dialog import QrLoginDialog
-from wa_ui.card_grid import TASKMGR_COLS, configure_equal_columns, grid_place
+from wa_ui.card_grid import TASKMGR_COLS, configure_equal_columns, grid_place, reorder_taskmgr_grid
 from wa_ui.taskmgr_tile_theme import (
     format_taskmgr_count_summary,
     taskmgr_card_status_text,
     taskmgr_count_jobs,
     taskmgr_fonts,
+    taskmgr_sort_jobs_for_display,
     taskmgr_tile_palette,
 )
 from wa_ui.log_textbox_util import (
@@ -67,7 +79,7 @@ from wa_ui.log_textbox_util import (
     bind_log_textbox_wheel,
     reload_log_textbox_from_memory,
 )
-from wa_ui.file_picker_util import txt_open_initial_dir
+from wa_ui.file_picker_util import pick_txt_or_folder, txt_open_initial_dir
 from wa_ui.scroll_util import (
     ADDRESS_LIST_HEIGHT,
     bind_scroll_tree_once,
@@ -117,6 +129,7 @@ class WaPanel(ctk.CTkFrame):
         self._pages_ready = False
         self._taskmgr_widgets: Dict[str, Dict[str, Any]] = {}
         self._taskmgr_listed_ids: List[str] = []
+        self._taskmgr_display_ids: List[str] = []
         self._taskmgr_fp_cache: Dict[str, tuple] = {}
         self._taskmgr_toggle_busy = False
         self._watch_audit_flags: Dict[str, str] = {}
@@ -207,7 +220,6 @@ class WaPanel(ctk.CTkFrame):
             self._render_taskmgr_cards()
         elif nav_id == "logs":
             self._reload_logs_page()
-            self._drain_log_queue_to_textbox()
 
     def bind_coordinator(self, coord: WaCoordinator) -> None:
         self._coord = coord
@@ -314,7 +326,13 @@ class WaPanel(ctk.CTkFrame):
         lb = getattr(self, "_log_box", None)
         if lb is None:
             return
-        reload_log_textbox_from_memory(lb, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES, max_lines=LOG_TEXTBOX_MAX_LINES)
+        reload_log_textbox_from_memory(
+            lb,
+            get_recent_lines,
+            limit=LOG_TEXTBOX_MAX_LINES,
+            max_lines=LOG_TEXTBOX_MAX_LINES,
+            log_queue=getattr(self, "_log_queue", None),
+        )
 
     def _pump_logs(self) -> None:
         if not self._log_pump_on:
@@ -1186,9 +1204,9 @@ class WaPanel(ctk.CTkFrame):
         self._s2_interval = ctk.CTkEntry(sf)
         self._s2_interval.insert(0, "5-10")
         self._s2_interval.pack(fill="x", pady=(0, 6))
-        self._s2_file = ctk.CTkEntry(sf, placeholder_text="选择 TXT（主号=按群自动；其它账号=账号管理中的简称）")
+        self._s2_file = ctk.CTkEntry(sf, placeholder_text="选择 TXT 或文件夹（文件夹内按数字前缀排序）")
         self._s2_file.pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(sf, text="选择 TXT", fg_color=COLORS["border"], command=self._pick_s2_txt).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(sf, text="选择 TXT / 文件夹", fg_color=COLORS["border"], command=self._pick_s2_source).pack(fill="x", pady=(0, 6))
         ctk.CTkButton(sf, text="添加文档任务", fg_color=COLORS["accent"], command=self._add_s2_job).pack(fill="x")
 
         inner, canvas, finish = mount_page_scroll(page, footer=sched_foot, bg=COLORS["bg"])
@@ -1280,6 +1298,14 @@ class WaPanel(ctk.CTkFrame):
         ).pack(fill="x")
         ctk.CTkButton(
             top,
+            text="一键开始下一天",
+            fg_color="#5a4a12",
+            hover_color="#6d5a18",
+            height=38,
+            command=self._start_next_s2_folder_day,
+        ).pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(
+            top,
             text="一键删除全部任务",
             fg_color=COLORS["danger"],
             hover_color="#b63a3a",
@@ -1308,6 +1334,8 @@ class WaPanel(ctk.CTkFrame):
             (j.pause_reason or "")[:40],
             j.cursor,
             j.source_name,
+            getattr(j, "folder_day_index", 0),
+            is_folder_job(j),
             schedule2_job_step_label(j),
             schedule2_job_target_remarks(cfg, j),
             self._task_reminder_summary(j),
@@ -1343,9 +1371,9 @@ class WaPanel(ctk.CTkFrame):
             ),
             text_color=pal["status"],
         )
-        fname = j.source_name or "未命名"
+        fname = taskmgr_job_file_label(j)
         w["file"].configure(
-            text=f"文档：{fname}",
+            text=fname,
             text_color=pal["file"],
         )
         rem = self._task_reminder_summary(j)
@@ -1484,6 +1512,15 @@ class WaPanel(ctk.CTkFrame):
         self._taskmgr_fp_cache[job_id] = self._taskmgr_fingerprint(j, self._cfg)
         self._apply_taskmgr_tile(w, j, self._cfg)
         self._update_taskmgr_count_label(jobs)
+        self._sync_taskmgr_display_order(jobs)
+
+    def _sync_taskmgr_display_order(self, jobs: List[Schedule2Job]) -> None:
+        display_jobs = taskmgr_sort_jobs_for_display(jobs, is_running=schedule2_job_is_running)
+        display_ids = [j.id for j in display_jobs]
+        if display_ids == self._taskmgr_display_ids:
+            return
+        reorder_taskmgr_grid(self._taskmgr_widgets, display_jobs, cols=TASKMGR_COLS, padx=6, pady=6)
+        self._taskmgr_display_ids = display_ids
 
     def _update_taskmgr_count_label(self, jobs: List[Schedule2Job]) -> None:
         lbl = getattr(self, "_taskmgr_count_lbl", None)
@@ -1505,6 +1542,7 @@ class WaPanel(ctk.CTkFrame):
                 self._taskmgr_widgets.clear()
                 self._taskmgr_fp_cache.clear()
                 self._taskmgr_listed_ids = []
+                self._taskmgr_display_ids = []
             if not self._taskmgr_cards.winfo_children():
                 ctk.CTkLabel(
                     self._taskmgr_cards,
@@ -1514,11 +1552,15 @@ class WaPanel(ctk.CTkFrame):
             self._update_taskmgr_count_label(jobs)
             self._sync_s2_job_pick_combo()
             return
+        display_jobs = taskmgr_sort_jobs_for_display(jobs, is_running=schedule2_job_is_running)
+        display_ids = [j.id for j in display_jobs]
         if force or ids != self._taskmgr_listed_ids:
             self._taskmgr_listed_ids = ids
-            self._full_rebuild_taskmgr_grid(jobs, cfg)
+            self._full_rebuild_taskmgr_grid(display_jobs, cfg)
+            self._taskmgr_display_ids = display_ids
         else:
             self._patch_taskmgr_grid(jobs, cfg)
+            self._sync_taskmgr_display_order(jobs)
         self._update_taskmgr_count_label(jobs)
         self._sync_s2_job_pick_combo()
         handler = getattr(self, "_taskmgr_scroll_handler", None)
@@ -1605,12 +1647,9 @@ class WaPanel(ctk.CTkFrame):
             disp = f"{ent.remark}（{cref_disp}{last_hint}）"
             ctk.CTkCheckBox(self._s2_targets, text=disp, variable=v, text_color=COLORS["text"]).pack(anchor="w", padx=4, pady=2)
 
-    def _pick_s2_txt(self) -> None:
-        kwargs: dict = {"filetypes": [("文本", "*.txt"), ("所有", "*.*")]}
-        start_dir = txt_open_initial_dir(self._s2_file.get() if hasattr(self, "_s2_file") else "")
-        if start_dir:
-            kwargs["initialdir"] = start_dir
-        path = filedialog.askopenfilename(**kwargs)
+    def _pick_s2_source(self) -> None:
+        cur = self._s2_file.get() if hasattr(self, "_s2_file") else ""
+        path = pick_txt_or_folder(self, current_path=cur)
         if path and hasattr(self, "_s2_file"):
             self._s2_file.delete(0, "end")
             self._s2_file.insert(0, path)
@@ -1685,8 +1724,14 @@ class WaPanel(ctk.CTkFrame):
             info("间隔格式无效，请填 5-10")
             return
         path = self._s2_file.get().strip()
-        if not path or not os.path.isfile(path):
-            info("请选择 TXT 文件")
+        if not path:
+            info("请选择 TXT 文件或文件夹")
+            return
+        if os.path.isdir(path):
+            self._add_s2_folder_jobs(path, selected, interval)
+            return
+        if not os.path.isfile(path):
+            info("路径无效，请选择 TXT 文件或文件夹")
             return
         try:
             text = open(path, encoding="utf-8").read()
@@ -1743,7 +1788,7 @@ class WaPanel(ctk.CTkFrame):
             info("未能创建任务：所选群无效")
             return
         save_schedule2_jobs(jobs)
-        apply_last_schedule_from_current_jobs(self._cfg)
+        apply_last_schedule_for_jobs(self._cfg, created)
         self._s2_edit_job_id = created[-1].id
         self._render_taskmgr_cards(force=True)
         if len(created) > 1:
@@ -1757,6 +1802,147 @@ class WaPanel(ctk.CTkFrame):
             )
         self._clear_s2_target_selection()
         self._refresh_s2_target_checks()
+
+    def _add_s2_folder_jobs(self, folder_path: str, selected: List[str], interval: tuple[float, float]) -> None:
+        rel_files, scan_errs = scan_schedule_folder(folder_path)
+        if scan_errs:
+            info("\n".join(scan_errs))
+            return
+        folder_abs = os.path.abspath(folder_path)
+        first_path = folder_txt_abs_path(folder_abs, rel_files[0])
+        try:
+            text = open(first_path, encoding="utf-8").read()
+        except OSError as exc:
+            info(f"读取失败：{exc}")
+            return
+        items, errs = import_doc_items(text, valid_accounts=None)
+        if not items:
+            info("首份 TXT 无有效条目")
+            for e in errs[:5]:
+                info(e)
+            return
+        for e in errs[:10]:
+            info(e)
+        rows: List[Schedule2Row] = []
+        for it in items:
+            orig, send = mark_row_primary_auto(it.account_id, it.account_id)
+            rows.append(
+                Schedule2Row(
+                    id=uuid.uuid4().hex[:12],
+                    original_account_id=orig,
+                    send_as_account_id=send,
+                    content=it.content,
+                    is_reminder=it.is_reminder,
+                    reminder_note=it.reminder_note,
+                    delay_after_minutes=it.delay_after_minutes,
+                )
+            )
+        by_eid = {e.id: e for e in self._cfg.address_book}
+        if row_needs_per_group_owner(rows):
+            for eid in selected:
+                ent = by_eid.get(eid)
+                if not ent or not (ent.owner_account_id or "").strip():
+                    info(f"群「{ent.remark if ent else eid}」未在通讯录选择主号/归属账号，请先在通讯录设置。")
+                    return
+        jobs = load_schedule2_jobs()
+        created: List[Schedule2Job] = []
+        for eid in selected:
+            ent = by_eid.get(eid)
+            if not ent:
+                continue
+            job_rows = copy.deepcopy(rows)
+            job = Schedule2Job.new(
+                [ent.chat_ref],
+                interval[0],
+                interval[1],
+                first_path,
+                job_rows,
+                chat_entry_ids=[eid],
+            )
+            job.source_kind = "folder"
+            job.folder_path = folder_abs
+            job.folder_files = list(rel_files)
+            job.folder_day_index = 0
+            jobs.append(job)
+            created.append(job)
+        if not created:
+            info("未能创建任务：所选群无效")
+            return
+        save_schedule2_jobs(jobs)
+        apply_last_schedule_for_jobs(self._cfg, created)
+        self._s2_edit_job_id = created[-1].id
+        self._render_taskmgr_cards(force=True)
+        if len(created) > 1:
+            info(
+                f"已为 {len(created)} 个群各添加 1 个文件夹任务（{len(rel_files)} 天，默认暂停）"
+            )
+        else:
+            info(
+                f"已添加文件夹任务（{len(rel_files)} 天，默认暂停）：第 1 天 {created[0].source_name}，{len(rows)} 步"
+            )
+        self._clear_s2_target_selection()
+        self._refresh_s2_target_checks()
+
+    def _start_next_s2_folder_day(self) -> None:
+        jobs = load_schedule2_jobs()
+        candidates = [j for j in jobs if can_advance_folder_day(j)]
+        if not candidates:
+            try:
+                messagebox.showinfo(
+                    "一键开始下一天",
+                    "没有可进入下一天的文件夹任务（需为文件夹任务且尚未到最后一份 TXT）。",
+                    parent=self,
+                )
+            except Exception:
+                info("没有可进入下一天的文件夹任务。")
+            return
+
+        lines: List[str] = []
+        running_n = 0
+        for j in candidates:
+            nxt = j.folder_day_index + 1
+            lines.append(
+                format_folder_advance_line(
+                    target_label=schedule2_job_target_remarks(self._cfg, j),
+                    current_name=j.source_name or "未命名",
+                    next_name=j.folder_files[nxt],
+                    next_day_one_based=nxt + 1,
+                    total_days=len(j.folder_files),
+                )
+            )
+            if schedule2_job_is_running(j):
+                running_n += 1
+
+        msg = "将中断当前天未发完的内容。\n\n"
+        if running_n:
+            msg += f"其中 {running_n} 个任务正在运行，切换后会立即停止当前天。\n\n"
+        msg += "将为以下文件夹任务切换到下一天并开始发送：\n"
+        msg += "\n".join(lines)
+        msg += "\n\n确定继续？"
+        try:
+            if not messagebox.askyesno("一键开始下一天", msg, parent=self):
+                return
+        except Exception:
+            return
+
+        self._cfg = load_config()
+        updated: List[Schedule2Job] = []
+        for j in candidates:
+            live = next((x for x in load_schedule2_jobs() if x.id == j.id), None)
+            if live is None or not can_advance_folder_day(live):
+                continue
+            ok, err = advance_schedule2_folder_day(live, self._cfg)
+            if ok:
+                updated.append(live)
+            else:
+                info(f"任务 {schedule2_job_target_remarks(self._cfg, live)} 切换失败：{err}")
+        if not updated:
+            info("未能切换任何文件夹任务。")
+            return
+        save_schedule2_jobs_patch(updated)
+        apply_last_schedule_for_jobs(self._cfg, updated)
+        self._render_taskmgr_cards(force=True)
+        info(f"已为 {len(updated)} 个文件夹任务切换到下一天并开始发送。")
 
     def _select_s2_job(self, job_id: str) -> None:
         self._s2_edit_job_id = job_id
@@ -1857,7 +2043,12 @@ class WaPanel(ctk.CTkFrame):
         )
         self._log_box.pack(fill="both", expand=True, pady=(0, 8))
         bind_log_textbox_wheel(self._log_box)
-        reload_log_textbox_from_memory(self._log_box, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES)
+        reload_log_textbox_from_memory(
+            self._log_box,
+            get_recent_lines,
+            limit=LOG_TEXTBOX_MAX_LINES,
+            log_queue=getattr(self, "_log_queue", None),
+        )
         finish()
         return page
 

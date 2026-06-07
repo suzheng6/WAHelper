@@ -113,6 +113,11 @@ class ScheduledJob:
     last_error: str = ""
     # txt：每条 间隔= ；fixed：界面填写的 X-X 分钟（TXT 未写间隔时）
     interval_mode: str = "txt"
+    # file=单 TXT；folder=文件夹内按天 TXT（folder_files 为相对路径列表）
+    source_kind: str = "file"
+    folder_path: str = ""
+    folder_files: List[str] = field(default_factory=list)
+    folder_day_index: int = 0
 
     @staticmethod
     def new(
@@ -359,6 +364,12 @@ def _load_jobs_raw() -> List[ScheduledJob]:
                     last_send_ts=float(row.get("last_send_ts", 0.0)),
                     last_error=str(row.get("last_error", "")),
                     interval_mode=str(row.get("interval_mode", "txt") or "txt"),
+                    source_kind=str(row.get("source_kind", "file") or "file"),
+                    folder_path=str(row.get("folder_path", "") or ""),
+                    folder_files=[
+                        str(x) for x in (row.get("folder_files") or []) if str(x).strip()
+                    ],
+                    folder_day_index=max(0, int(row.get("folder_day_index", 0) or 0)),
                 )
             )
         except (TypeError, ValueError, KeyError):
@@ -390,6 +401,67 @@ def save_jobs_patch(updated: List[ScheduledJob]) -> None:
         if j.id not in order:
             order.append(j.id)
     save_jobs([by_id[jid] for jid in order])
+
+
+def _reload_folder_day_items_tg(job: ScheduledJob, cfg: AppConfig, rel_name: str) -> tuple[bool, str]:
+    from .group_owner import apply_main_account_mapping, clone_doc_items, doc_has_main_account_placeholder
+    from .schedule_txt_import import import_doc_items
+
+    from schedule_folder import read_folder_txt_utf8
+
+    text, err = read_folder_txt_utf8(job.folder_path, rel_name)
+    if err:
+        return False, err
+    valid = {a.id for a in cfg.accounts if getattr(a, "enabled", True)}
+    items, _errors = import_doc_items(text, valid_accounts=valid, require_per_item_interval=False)
+    sends = [it for it in items if not it.is_reminder]
+    if not sends:
+        return False, "TXT 中没有可发送条目"
+    if doc_has_main_account_placeholder(items):
+        emap = {e.id: e for e in cfg.address_book}
+        owner = ""
+        for eid in job.chat_entry_ids:
+            ent = emap.get(eid)
+            if ent:
+                owner = (ent.owner_account_id or "").strip()
+                break
+        if not owner:
+            return False, "未在通讯录设置归属账号"
+        if owner not in valid:
+            return False, f"归属账号「{owner}」未启用"
+        job_items = clone_doc_items(items)
+        if apply_main_account_mapping(job_items, owner) == 0:
+            return False, "文档中未找到 账号=主号（或主账号）条目"
+        items = job_items
+    abs_path = os.path.join(os.path.abspath(job.folder_path), rel_name)
+    job.items = items
+    job.source_path = abs_path
+    job.source_name = os.path.basename(abs_path) or rel_name
+    return True, ""
+
+
+def advance_scheduled_folder_day(job: ScheduledJob, cfg: AppConfig) -> tuple[bool, str]:
+    """文件夹任务进入下一天：加载下一份 TXT 并开始发送（会中断当前天）。"""
+    from schedule_folder import can_advance_folder_day
+
+    if not can_advance_folder_day(job):
+        return False, "已是最后一天或不是文件夹任务"
+    next_index = int(job.folder_day_index) + 1
+    rel = job.folder_files[next_index]
+    ok, err = _reload_folder_day_items_tg(job, cfg, rel)
+    if not ok:
+        return False, err
+    job.folder_day_index = next_index
+    job.cursor = 0
+    job.enabled = True
+    job.state = "running"
+    job.pause_reason = ""
+    from schedule_folder import random_folder_advance_delay_seconds
+
+    job.next_send_ts = time.time() + random_folder_advance_delay_seconds()
+    job.remaining_seconds = 0.0
+    job.last_error = ""
+    return True, ""
 
 
 STARTUP_PAUSE_REASON = "程序启动后已自动暂停，请在定时任务中点「继续」后再运行。"

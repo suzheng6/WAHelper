@@ -11,13 +11,22 @@ if str(_pkg_root) not in sys.path:
 _wa_pkg = _pkg_root.parent / "wa_multi_listener"
 if _wa_pkg.is_dir() and str(_wa_pkg) not in sys.path:
     sys.path.insert(0, str(_wa_pkg))
-from wa_ui.card_grid import TASKMGR_COLS, TG_ACCT_COLS, configure_equal_columns, grid_place
+from wa_ui.card_grid import TASKMGR_COLS, TG_ACCT_COLS, configure_equal_columns, grid_place, reorder_taskmgr_grid
 from wa_ui.taskmgr_tile_theme import (
     format_taskmgr_count_summary,
     taskmgr_card_status_text,
     taskmgr_count_jobs,
     taskmgr_fonts,
+    taskmgr_sort_jobs_for_display,
     taskmgr_tile_palette,
+)
+from schedule_folder import (
+    can_advance_folder_day,
+    format_folder_advance_line,
+    folder_txt_abs_path,
+    is_folder_job,
+    scan_schedule_folder,
+    taskmgr_job_file_label,
 )
 from wa_ui.log_textbox_util import (
     LOG_PUMP_IDLE_MS,
@@ -27,7 +36,7 @@ from wa_ui.log_textbox_util import (
     bind_log_textbox_wheel,
     reload_log_textbox_from_memory,
 )
-from wa_ui.file_picker_util import txt_open_initial_dir
+from wa_ui.file_picker_util import pick_txt_or_folder, txt_open_initial_dir
 from wa_ui.scroll_util import (
     ADDRESS_LIST_HEIGHT,
     bind_scroll_tree_once,
@@ -56,6 +65,7 @@ import customtkinter as ctk
 from ..compat_config import (
     Account,
     AddressEntry,
+    apply_last_schedule_for_jobs,
     apply_last_schedule_from_current_jobs,
     chat_ref_to_optional_int,
     format_job_targets_label,
@@ -75,6 +85,7 @@ from ..scheduler import (
     DocMessage,
     ScheduledJob,
     ScheduleRunner,
+    advance_scheduled_folder_day,
     load_jobs,
     save_jobs,
     save_jobs_patch,
@@ -132,6 +143,7 @@ class MainWindow(ctk.CTkFrame):
         self._sched_job_fingerprints: Dict[str, tuple] = {}
         self._taskmgr_widgets: Dict[str, Dict[str, Any]] = {}
         self._taskmgr_listed_ids: List[str] = []
+        self._taskmgr_display_ids: List[str] = []
         self._taskmgr_fp_cache: Dict[str, tuple] = {}
         self._taskmgr_toggle_busy = False
         self._sched_target_rows: List[Tuple[AddressEntry, ctk.BooleanVar]] = []
@@ -663,7 +675,6 @@ class MainWindow(ctk.CTkFrame):
             self._render_taskmgr_cards()
         elif nav_id == "logs":
             self._flush_logs_ui()
-            self._drain_log_queue_to_textbox()
 
     def _schedule_login_probe(self) -> None:
         """后台检测各账号 session 是否已授权；结果用于账号行样式与仪表盘。"""
@@ -1750,9 +1761,9 @@ class MainWindow(ctk.CTkFrame):
         self._sched_interval = ctk.CTkEntry(sf, placeholder_text="如 5-10")
         self._sched_interval.insert(0, "5-10")
         self._sched_interval.pack(fill="x", pady=(0, 6))
-        self._jfile = ctk.CTkEntry(sf, placeholder_text="选择 TXT（可含未添加的原文账号，导入后再批量替换）")
+        self._jfile = ctk.CTkEntry(sf, placeholder_text="选择 TXT 或文件夹（文件夹内按数字前缀排序，如 1.txt、3飞机.txt）")
         self._jfile.pack(fill="x", pady=(0, 6))
-        ctk.CTkButton(sf, text="选择 TXT", fg_color=COLORS["border"], command=self._pick_schedule_txt).pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(sf, text="选择 TXT / 文件夹", fg_color=COLORS["border"], command=self._pick_schedule_source).pack(fill="x", pady=(0, 6))
         ctk.CTkButton(sf, text="添加文档任务", fg_color=COLORS["accent"], command=self._add_job).pack(fill="x")
 
         wrap, finish_scroll = self._mount_main_scroll(page, footer=sched_foot)
@@ -1851,6 +1862,14 @@ class MainWindow(ctk.CTkFrame):
         ).pack(fill="x", pady=(0, 10))
         ctk.CTkButton(
             wrap,
+            text="一键开始下一天",
+            fg_color="#5a4a12",
+            hover_color="#6d5a18",
+            height=38,
+            command=self._start_next_folder_day,
+        ).pack(fill="x", pady=(0, 10))
+        ctk.CTkButton(
+            wrap,
             text="一键删除全部任务",
             fg_color=COLORS["danger"],
             hover_color="#b63a3a",
@@ -1910,6 +1929,8 @@ class MainWindow(ctk.CTkFrame):
             (j.pause_reason or "")[:40],
             j.cursor,
             j.source_name,
+            getattr(j, "folder_day_index", 0),
+            is_folder_job(j),
             self._doc_job_step_label(j),
             self._job_target_short(j),
             self._task_reminder_summary(j),
@@ -1949,7 +1970,7 @@ class MainWindow(ctk.CTkFrame):
             text_color=pal["status"],
         )
         w["file"].configure(
-            text=f"文档：{j.source_name or '未命名'}",
+            text=taskmgr_job_file_label(j),
             text_color=pal["file"],
         )
         rem = self._task_reminder_summary(j)
@@ -2088,6 +2109,15 @@ class MainWindow(ctk.CTkFrame):
         self._taskmgr_fp_cache[job_id] = self._taskmgr_fingerprint(j)
         self._apply_taskmgr_tile(w, j)
         self._update_taskmgr_count_label(jobs)
+        self._sync_taskmgr_display_order(jobs)
+
+    def _sync_taskmgr_display_order(self, jobs: List[ScheduledJob]) -> None:
+        display_jobs = taskmgr_sort_jobs_for_display(jobs, is_running=self._doc_job_is_running)
+        display_ids = [j.id for j in display_jobs]
+        if display_ids == self._taskmgr_display_ids:
+            return
+        reorder_taskmgr_grid(self._taskmgr_widgets, display_jobs, cols=TASKMGR_COLS, padx=6, pady=6)
+        self._taskmgr_display_ids = display_ids
 
     def _update_taskmgr_count_label(self, jobs: List[ScheduledJob]) -> None:
         lbl = getattr(self, "_taskmgr_count_lbl", None)
@@ -2122,6 +2152,7 @@ class MainWindow(ctk.CTkFrame):
                 self._taskmgr_widgets.clear()
                 self._taskmgr_fp_cache.clear()
                 self._taskmgr_listed_ids = []
+                self._taskmgr_display_ids = []
             if not self._taskmgr_cards.winfo_children():
                 ctk.CTkLabel(
                     self._taskmgr_cards,
@@ -2131,11 +2162,15 @@ class MainWindow(ctk.CTkFrame):
             self._update_taskmgr_count_label(jobs)
             self._sync_sched_job_pick_combo()
             return
+        display_jobs = taskmgr_sort_jobs_for_display(jobs, is_running=self._doc_job_is_running)
+        display_ids = [j.id for j in display_jobs]
         if force or ids != self._taskmgr_listed_ids:
             self._taskmgr_listed_ids = ids
-            self._full_rebuild_taskmgr_grid(jobs)
+            self._full_rebuild_taskmgr_grid(display_jobs)
+            self._taskmgr_display_ids = display_ids
         else:
             self._patch_taskmgr_grid(jobs)
+            self._sync_taskmgr_display_order(jobs)
         self._update_taskmgr_count_label(jobs)
         self._sync_sched_job_pick_combo()
         handler = getattr(self, "_scroll_wheel_handler", None)
@@ -2161,16 +2196,9 @@ class MainWindow(ctk.CTkFrame):
         else:
             info("没有可恢复的暂停或已停止任务")
 
-    def _pick_schedule_txt(self) -> None:
-        kwargs: dict = {
-            "parent": self,
-            "title": "选择 UTF-8 编码 TXT（仅账号+消息）",
-            "filetypes": [("文本", "*.txt"), ("所有文件", "*.*")],
-        }
-        start_dir = txt_open_initial_dir(self._jfile.get() if getattr(self, "_jfile", None) else "")
-        if start_dir:
-            kwargs["initialdir"] = start_dir
-        path = filedialog.askopenfilename(**kwargs)
+    def _pick_schedule_source(self) -> None:
+        cur = self._jfile.get() if getattr(self, "_jfile", None) else ""
+        path = pick_txt_or_folder(self, current_path=cur)
         if path:
             self._jfile.delete(0, "end")
             self._jfile.insert(0, path)
@@ -2219,7 +2247,13 @@ class MainWindow(ctk.CTkFrame):
             return
         path = self._jfile.get().strip()
         if not path:
-            self._sched_add_fail("请先选择 TXT 文件。")
+            self._sched_add_fail("请先选择 TXT 文件或文件夹。")
+            return
+        if os.path.isdir(path):
+            self._add_folder_jobs(path, selected_ids)
+            return
+        if not os.path.isfile(path):
+            self._sched_add_fail("路径无效，请选择 TXT 文件或文件夹。")
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -2335,7 +2369,7 @@ class MainWindow(ctk.CTkFrame):
             return
 
         save_jobs(jobs)
-        apply_last_schedule_from_current_jobs(self._cfg)
+        apply_last_schedule_for_jobs(self._cfg, created)
         self._sched_edit_job_id = created[-1].id
         self._render_taskmgr_cards()
         main_note = ""
@@ -2352,6 +2386,222 @@ class MainWindow(ctk.CTkFrame):
             )
         self._clear_sched_target_selection()
         self._refresh_schedule_target_checks()
+
+    def _add_folder_jobs(self, folder_path: str, selected_ids: List[str]) -> None:
+        rel_files, scan_errs = scan_schedule_folder(folder_path)
+        if scan_errs:
+            self._sched_add_fail("\n".join(scan_errs))
+            return
+        folder_abs = os.path.abspath(folder_path)
+        first_rel = rel_files[0]
+        first_path = folder_txt_abs_path(folder_abs, first_rel)
+        try:
+            with open(first_path, "r", encoding="utf-8") as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            self._sched_add_fail("TXT 解码失败，请另存为 UTF-8 编码。")
+            return
+        except OSError as exc:
+            self._sched_add_fail(f"读取 TXT 失败：{exc}")
+            return
+        valid = {a.id for a in self._cfg.accounts}
+        if not valid:
+            self._sched_add_fail("请先在「账号管理」添加至少一个账号。")
+            return
+        items, errors = import_doc_items(text, valid_accounts=valid, require_per_item_interval=False)
+        sends = [it for it in items if not it.is_reminder]
+        if not sends:
+            hint = "首份 TXT 中没有可发送条目（需 账号= 与 消息=）。"
+            if errors:
+                hint += "\n" + "\n".join(errors[:8])
+            self._sched_add_fail(hint)
+            return
+        if errors:
+            for e in errors[:10]:
+                info(e)
+        all_txt = items_use_txt_intervals(items)
+        any_txt = items_have_any_txt_interval(items)
+        ui_interval = self._parse_interval_minutes(
+            self._sched_interval.get().strip() if getattr(self, "_sched_interval", None) else ""
+        )
+        min_m = 0.0
+        max_m = 0.0
+        if all_txt:
+            mode = "txt"
+            if not ui_interval:
+                self._sched_add_fail(
+                    "文件夹任务请在底部「固定间隔」填写分钟数（供某天 TXT 未写 间隔= 时使用），格式：5 或 5-10。"
+                )
+                return
+            min_m, max_m = ui_interval
+            interval_note = f"间隔：TXT 每条 间隔=；无间隔条目用固定 {min_m:g}-{max_m:g} 分"
+        else:
+            interval = ui_interval
+            if interval is None:
+                if any_txt:
+                    self._sched_add_fail(
+                        "部分条目未写 间隔=，请在底部「固定间隔」填写补充间隔（分钟），格式：5 或 5-10。"
+                    )
+                else:
+                    self._sched_add_fail(
+                        "TXT 未写每条 间隔= 时，请在底部「固定间隔」填写分钟数，格式：5 或 5-10。"
+                    )
+                return
+            min_m, max_m = interval
+            mode = "mixed" if any_txt else "fixed"
+            interval_note = (
+                f"间隔：TXT 优先 + 固定 {min_m:g}-{max_m:g} 分/条"
+                if any_txt
+                else f"间隔：固定 {min_m:g}-{max_m:g} 分钟"
+            )
+        has_main = doc_has_main_account_placeholder(items)
+        by_eid = {e.id: e for e in self._cfg.address_book}
+        jobs = load_jobs()
+        created: List[ScheduledJob] = []
+        skipped: List[str] = []
+
+        def _owner_for_entry(ent: AddressEntry) -> str:
+            return (ent.owner_account_id or "").strip()
+
+        targets: List[AddressEntry] = []
+        for eid in selected_ids:
+            ent = by_eid.get(eid)
+            if ent:
+                targets.append(ent)
+
+        for ent in targets:
+            if has_main:
+                owner = _owner_for_entry(ent)
+                if not owner:
+                    skipped.append(ent.remark.strip() or ent.id)
+                    continue
+                if owner not in valid:
+                    self._sched_add_fail(
+                        f"群「{ent.remark}」归属账号「{owner}」未在账号管理中启用，请先登录该账号。"
+                    )
+                    return
+                job_items = clone_doc_items(items)
+                mapped = apply_main_account_mapping(job_items, owner)
+                if mapped == 0:
+                    self._sched_add_fail("文档中未找到 账号=主号（或主账号）条目。")
+                    return
+            else:
+                job_items = clone_doc_items(items)
+
+            chat_nums: List[int] = []
+            n = chat_ref_to_optional_int(ent.chat_ref)
+            if n is not None:
+                chat_nums.append(n)
+            job = ScheduledJob.new(
+                chat_ids=chat_nums,
+                source_path=first_path,
+                items=job_items,
+                chat_entry_ids=[ent.id],
+                interval_min_minutes=min_m,
+                interval_max_minutes=max_m,
+                interval_mode=mode,
+                start_paused=True,
+            )
+            job.source_kind = "folder"
+            job.folder_path = folder_abs
+            job.folder_files = list(rel_files)
+            job.folder_day_index = 0
+            jobs.append(job)
+            created.append(job)
+
+        if skipped:
+            info("以下群未在通讯录选择归属账号，已跳过：" + "、".join(skipped))
+        if not created:
+            if has_main:
+                self._sched_add_fail("未能为任何所选群创建任务：请先在通讯录为各群选择「归属账号」。")
+            else:
+                self._sched_add_fail("未能创建任务。")
+            return
+
+        save_jobs(jobs)
+        apply_last_schedule_for_jobs(self._cfg, created)
+        self._sched_edit_job_id = created[-1].id
+        self._render_taskmgr_cards()
+        main_note = ""
+        if has_main:
+            main_note = "；账号=主号 已按各群归属账号自动映射"
+        j0 = created[0]
+        names_preview = "、".join(rel_files[:5])
+        if len(rel_files) > 5:
+            names_preview += f" 等 {len(rel_files)} 个"
+        if len(created) > 1:
+            info(
+                f"已为 {len(created)} 个群各添加 1 个文件夹任务（{len(rel_files)} 天，默认暂停）："
+                f"{names_preview}{main_note}"
+            )
+        else:
+            info(
+                f"已添加文件夹任务（{len(rel_files)} 天，默认暂停）：{self._job_target_short(j0)} · "
+                f"第 1 天 {j0.source_name}（{len(items)} 步，{interval_note}）{main_note}"
+            )
+        self._clear_sched_target_selection()
+        self._refresh_schedule_target_checks()
+
+    def _start_next_folder_day(self) -> None:
+        jobs = load_jobs()
+        candidates = [j for j in jobs if can_advance_folder_day(j)]
+        if not candidates:
+            try:
+                messagebox.showinfo(
+                    "一键开始下一天",
+                    "没有可进入下一天的文件夹任务（需为文件夹任务且尚未到最后一份 TXT）。",
+                    parent=self,
+                )
+            except Exception:
+                info("没有可进入下一天的文件夹任务。")
+            return
+
+        lines: List[str] = []
+        running_n = 0
+        for j in candidates:
+            nxt = j.folder_day_index + 1
+            lines.append(
+                format_folder_advance_line(
+                    target_label=self._job_target_short(j),
+                    current_name=j.source_name or "未命名",
+                    next_name=j.folder_files[nxt],
+                    next_day_one_based=nxt + 1,
+                    total_days=len(j.folder_files),
+                )
+            )
+            if self._doc_job_is_running(j):
+                running_n += 1
+
+        msg = "将中断当前天未发完的内容。\n\n"
+        if running_n:
+            msg += f"其中 {running_n} 个任务正在运行，切换后会立即停止当前天。\n\n"
+        msg += "将为以下文件夹任务切换到下一天并开始发送：\n"
+        msg += "\n".join(lines)
+        msg += "\n\n确定继续？"
+        try:
+            if not messagebox.askyesno("一键开始下一天", msg, parent=self):
+                return
+        except Exception:
+            return
+
+        self._cfg = load_config()
+        updated: List[ScheduledJob] = []
+        for j in candidates:
+            live = next((x for x in load_jobs() if x.id == j.id), None)
+            if live is None or not can_advance_folder_day(live):
+                continue
+            ok, err = advance_scheduled_folder_day(live, self._cfg)
+            if ok:
+                updated.append(live)
+            else:
+                info(f"任务 {self._job_target_short(live)} 切换失败：{err}")
+        if not updated:
+            info("未能切换任何文件夹任务。")
+            return
+        save_jobs_patch(updated)
+        apply_last_schedule_for_jobs(self._cfg, updated)
+        self._render_taskmgr_cards(force=True)
+        info(f"已为 {len(updated)} 个文件夹任务切换到下一天并开始发送。")
 
     def _sched_job_fingerprint(self, j: ScheduledJob) -> tuple:
         stotal, sdone, sremain = j.send_progress()
@@ -2736,7 +2986,12 @@ class MainWindow(ctk.CTkFrame):
         )
         self._log_box.pack(fill="both", expand=True, pady=(0, 8))
         bind_log_textbox_wheel(self._log_box)
-        reload_log_textbox_from_memory(self._log_box, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES)
+        reload_log_textbox_from_memory(
+            self._log_box,
+            get_recent_lines,
+            limit=LOG_TEXTBOX_MAX_LINES,
+            log_queue=getattr(self, "_log_ui_queue", None),
+        )
 
         finish_scroll()
         return page
@@ -2745,7 +3000,13 @@ class MainWindow(ctk.CTkFrame):
         lb = getattr(self, "_log_box", None)
         if lb is None:
             return
-        reload_log_textbox_from_memory(lb, get_recent_lines, limit=LOG_TEXTBOX_MAX_LINES, max_lines=LOG_TEXTBOX_MAX_LINES)
+        reload_log_textbox_from_memory(
+            lb,
+            get_recent_lines,
+            limit=LOG_TEXTBOX_MAX_LINES,
+            max_lines=LOG_TEXTBOX_MAX_LINES,
+            log_queue=getattr(self, "_log_ui_queue", None),
+        )
 
     def _save_all_and_restart(self) -> None:
         if not getattr(self, "_pages_ready", False):

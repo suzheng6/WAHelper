@@ -66,6 +66,38 @@ def _is_listen_hit_pause(pause_reason: str) -> bool:
     return "监听命中" in (pause_reason or "")
 
 
+def taskmgr_needs_attention(*, running: bool, enabled: bool, pause_reason: str = "") -> bool:
+    """监听命中或阶段提醒而暂停的任务，在任务管理页置顶展示。"""
+    if running or not enabled:
+        return False
+    r = (pause_reason or "").strip()
+    if _is_listen_hit_pause(r):
+        return True
+    if "阶段提醒" in r and "已自动暂停" in r:
+        return True
+    return False
+
+
+def taskmgr_sort_jobs_for_display(
+    jobs: Iterable[Any],
+    *,
+    is_running: Callable[[Any], bool],
+) -> list[Any]:
+    """置顶需人工处理的暂停任务；其余保持 schedules.json 原顺序。"""
+    indexed = list(enumerate(jobs))
+
+    def _key(item: tuple[int, Any]) -> tuple[int, int]:
+        i, j = item
+        attention = taskmgr_needs_attention(
+            running=is_running(j),
+            enabled=bool(getattr(j, "enabled", False)),
+            pause_reason=(getattr(j, "pause_reason", None) or ""),
+        )
+        return (0 if attention else 1, i)
+
+    return [j for _, j in sorted(indexed, key=_key)]
+
+
 def taskmgr_job_bucket(*, running: bool, enabled: bool, pause_reason: str = "") -> TaskmgrBucket:
     if running:
         return "running"

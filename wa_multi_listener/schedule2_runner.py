@@ -67,6 +67,10 @@ class Schedule2Job:
     remaining_seconds: float = 0.0
     last_send_ts: float = 0.0
     last_error: str = ""
+    source_kind: str = "file"
+    folder_path: str = ""
+    folder_files: List[str] = field(default_factory=list)
+    folder_day_index: int = 0
 
     @staticmethod
     def new(
@@ -179,6 +183,10 @@ def _job_from_dict(row: Dict[str, Any]) -> Optional[Schedule2Job]:
         remaining_seconds=max(0.0, float(row.get("remaining_seconds", 0.0))),
         last_send_ts=float(row.get("last_send_ts", 0.0)),
         last_error=str(row.get("last_error", "")),
+        source_kind=str(row.get("source_kind", "file") or "file"),
+        folder_path=str(row.get("folder_path", "") or ""),
+        folder_files=[str(x) for x in (row.get("folder_files") or []) if str(x).strip()],
+        folder_day_index=max(0, int(row.get("folder_day_index", 0) or 0)),
     )
 
 
@@ -219,6 +227,73 @@ def save_schedule2_jobs_patch(updated: List[Schedule2Job]) -> None:
         if j.id not in order:
             order.append(j.id)
     save_schedule2_jobs([by_id[jid] for jid in order])
+
+
+def _doc_items_to_s2_rows(items: List[DocMessage]) -> List[Schedule2Row]:
+    from schedule_account import mark_row_primary_auto
+
+    rows: List[Schedule2Row] = []
+    for it in items:
+        orig, send = mark_row_primary_auto(it.account_id, it.account_id)
+        rows.append(
+            Schedule2Row(
+                id=uuid.uuid4().hex[:12],
+                original_account_id=orig,
+                send_as_account_id=send,
+                content=it.content,
+                is_reminder=it.is_reminder,
+                reminder_note=it.reminder_note,
+                delay_after_minutes=it.delay_after_minutes,
+            )
+        )
+    return rows
+
+
+def _reload_folder_day_items_s2(job: Schedule2Job, cfg: AppConfig, rel_name: str) -> tuple[bool, str]:
+    from schedule_folder import read_folder_txt_utf8
+    from schedule_txt_import import import_doc_items
+
+    text, err = read_folder_txt_utf8(job.folder_path, rel_name)
+    if err:
+        return False, err
+    items, _errs = import_doc_items(text, valid_accounts=None)
+    if not items:
+        return False, "TXT 无有效条目"
+    rows = _doc_items_to_s2_rows(items)
+    if row_needs_per_group_owner(rows):
+        emap = {e.id: e for e in cfg.address_book}
+        for eid in job.chat_entry_ids:
+            ent = emap.get(eid)
+            if not ent or not (ent.owner_account_id or "").strip():
+                return False, "未在通讯录设置主号/归属账号"
+    job.rows = rows
+    abs_path = os.path.join(os.path.abspath(job.folder_path), rel_name)
+    job.source_path = abs_path
+    job.source_name = os.path.basename(abs_path) or rel_name
+    return True, ""
+
+
+def advance_schedule2_folder_day(job: Schedule2Job, cfg: AppConfig) -> tuple[bool, str]:
+    from schedule_folder import can_advance_folder_day
+
+    if not can_advance_folder_day(job):
+        return False, "已是最后一天或不是文件夹任务"
+    next_index = int(job.folder_day_index) + 1
+    rel = job.folder_files[next_index]
+    ok, err = _reload_folder_day_items_s2(job, cfg, rel)
+    if not ok:
+        return False, err
+    job.folder_day_index = next_index
+    job.cursor = 0
+    job.enabled = True
+    job.state = "running"
+    job.pause_reason = ""
+    from schedule_folder import random_folder_advance_delay_seconds
+
+    job.next_send_ts = time.time() + random_folder_advance_delay_seconds()
+    job.remaining_seconds = 0.0
+    job.last_error = ""
+    return True, ""
 
 
 STARTUP_PAUSE_REASON_S2 = "程序启动后已自动暂停，请在「任务管理」点「一键开始全部任务」。"

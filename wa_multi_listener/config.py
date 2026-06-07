@@ -8,7 +8,7 @@ import shutil
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from paths import resource_path
 from platform_paths import migrate_legacy_wa_layout, wa_data_root
@@ -225,16 +225,12 @@ def merge_last_schedule_from_disk(cfg: AppConfig) -> None:
     return
 
 
-def apply_last_schedule_from_current_jobs(cfg: AppConfig) -> bool:
-    """按任务管理当前列表刷新「上次任务文件名」：有任务→该任务 TXT 名；无任务→空。
-
-    仅在添加任务或用户点「从任务管理同步上次任务」时调用；删除任务不调用。
-    """
-    from schedule2_runner import load_schedule2_jobs
+def _schedule_name_map_for_jobs(cfg: AppConfig, jobs: Sequence[Any]) -> Dict[str, str]:
+    """将任务列表映射为 通讯录条目 id -> 任务 TXT 文件名。"""
     from wa_jid import keys_for_chat_ref
 
     job_map: Dict[str, str] = {}
-    for j in load_schedule2_jobs():
+    for j in jobs:
         name = (getattr(j, "source_name", None) or "").strip()
         entry_ids = [str(x).strip() for x in (getattr(j, "chat_entry_ids", None) or []) if str(x).strip()]
         if entry_ids:
@@ -248,7 +244,35 @@ def apply_last_schedule_from_current_jobs(cfg: AppConfig) -> bool:
             ref = (ent.chat_ref or "").strip()
             if ref in chat_keys or keys_for_chat_ref(ref) & chat_keys:
                 job_map[ent.id] = name
+    return job_map
 
+
+def apply_last_schedule_for_jobs(cfg: AppConfig, jobs: Sequence[Any]) -> bool:
+    """仅更新指定任务对应群的「上次任务文件名」，不清空其它群的历史标记。"""
+    job_map = _schedule_name_map_for_jobs(cfg, jobs)
+    if not job_map:
+        return False
+    changed = False
+    for ent in cfg.address_book:
+        if ent.id not in job_map:
+            continue
+        new_val = job_map[ent.id]
+        if ent.last_schedule_source_name != new_val:
+            ent.last_schedule_source_name = new_val
+            changed = True
+    if changed:
+        save_config(cfg)
+    return changed
+
+
+def apply_last_schedule_from_current_jobs(cfg: AppConfig) -> bool:
+    """按任务管理当前列表刷新「上次任务文件名」：有任务→该任务 TXT 名；无任务→空。
+
+    仅由用户点「从任务管理同步上次任务」时调用；添加任务请用 apply_last_schedule_for_jobs。
+    """
+    from schedule2_runner import load_schedule2_jobs
+
+    job_map = _schedule_name_map_for_jobs(cfg, load_schedule2_jobs())
     changed = False
     for ent in cfg.address_book:
         new_val = job_map.get(ent.id, "")

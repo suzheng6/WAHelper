@@ -1,6 +1,7 @@
 """日志 Textbox 辅助：限长、刷新、本地滚轮（避免被页面 Canvas 滚轮抢走）。"""
 from __future__ import annotations
 
+import queue
 import tkinter as tk
 from typing import Any, Callable, List, Sequence
 
@@ -30,13 +31,26 @@ def reload_log_textbox(
         pass
 
 
+def discard_log_queue(log_queue: Any) -> None:
+    """丢弃尚未写入 Textbox 的排队日志（内存缓冲为唯一来源，避免与 reload 重复）。"""
+    if log_queue is None:
+        return
+    while True:
+        try:
+            log_queue.get_nowait()
+        except queue.Empty:
+            break
+
+
 def reload_log_textbox_from_memory(
     textbox: Any,
     get_recent_lines: Callable[[int], List[str]],
     *,
     limit: int = LOG_TEXTBOX_MAX_LINES,
     max_lines: int = LOG_TEXTBOX_MAX_LINES,
+    log_queue: Any = None,
 ) -> None:
+    discard_log_queue(log_queue)
     reload_log_textbox(textbox, get_recent_lines(limit), max_lines=max_lines)
 
 
