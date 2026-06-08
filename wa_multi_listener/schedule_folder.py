@@ -81,6 +81,40 @@ def can_advance_folder_day(job: Any) -> bool:
     return idx < total - 1
 
 
+def _job_step_count(job: Any) -> int:
+    items = getattr(job, "items", None)
+    if items is not None:
+        return len(items)
+    rows = getattr(job, "rows", None)
+    if rows is not None:
+        return len(rows)
+    return 0
+
+
+def is_folder_job_fully_completed(job: Any) -> bool:
+    """文件夹任务：已到最后一天且当天条目已全部发完。"""
+    if not is_folder_job(job):
+        return False
+    total = folder_day_total(job)
+    if total <= 0:
+        return False
+    idx = int(getattr(job, "folder_day_index", 0) or 0)
+    if idx < total - 1:
+        return False
+    steps = _job_step_count(job)
+    if steps <= 0:
+        return False
+    cursor = max(0, int(getattr(job, "cursor", 0) or 0))
+    return cursor >= steps
+
+
+def job_eligible_for_bulk_delete(job: Any) -> bool:
+    """一键删除：单 TXT 任务；或文件夹任务且全部天数已发完。"""
+    if not is_folder_job(job):
+        return True
+    return is_folder_job_fully_completed(job)
+
+
 def taskmgr_job_file_label(job: Any) -> str:
     """任务卡片「文档：」行文案（位置不变，文件夹任务附加天数）。"""
     name = (getattr(job, "source_name", None) or "").strip() or "未命名"

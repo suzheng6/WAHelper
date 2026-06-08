@@ -27,7 +27,7 @@ from wa_ui.app import WaPanel
 from wa_ui.theme import COLORS
 
 MAIN_GEOMETRY = "1180x760"
-APP_VERSION = "v2.0.2"
+APP_VERSION = "v2.0.3"
 _AI_ROOT = _pkg_root.parent
 
 

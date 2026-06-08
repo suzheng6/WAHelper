@@ -25,6 +25,7 @@ from schedule_folder import (
     format_folder_advance_line,
     folder_txt_abs_path,
     is_folder_job,
+    job_eligible_for_bulk_delete,
     scan_schedule_folder,
     taskmgr_job_file_label,
 )
@@ -2950,19 +2951,34 @@ class MainWindow(ctk.CTkFrame):
         if not jobs:
             info("当前没有可删除的任务。")
             return
-        ok = messagebox.askyesno(
-            "确认删除",
-            f"确定删除全部 {len(jobs)} 个任务吗？此操作不可恢复。",
-            parent=self,
+        to_delete = [j for j in jobs if job_eligible_for_bulk_delete(j)]
+        kept = [j for j in jobs if not job_eligible_for_bulk_delete(j)]
+        if not to_delete:
+            info("没有可批量删除的任务（仅删除单 TXT 任务，或文件夹任务全部天数已发完）。")
+            if kept:
+                info(f"保留 {len(kept)} 个未完成的文件夹任务。")
+            return
+        msg = (
+            f"将删除 {len(to_delete)} 个任务"
+            f"（单 TXT 或文件夹全部天数已发完）。"
         )
+        if kept:
+            msg += f"\n\n保留 {len(kept)} 个未完成的文件夹任务。"
+        msg += "\n\n确定继续？"
+        ok = messagebox.askyesno("确认删除", msg, parent=self)
         if not ok:
             return
-        save_jobs([])
-        self._sched_edit_job_id = None
+        save_jobs(kept)
+        deleted_ids = {j.id for j in to_delete}
+        if getattr(self, "_sched_edit_job_id", None) in deleted_ids:
+            self._sched_edit_job_id = kept[0].id if kept else None
         self._render_jobs(full=True)
         self._render_taskmgr_cards(force=True)
         self._sync_sched_job_pick_combo()
-        info(f"已删除全部 {len(jobs)} 个任务。")
+        if kept:
+            info(f"已删除 {len(to_delete)} 个任务，保留 {len(kept)} 个未完成的文件夹任务。")
+        else:
+            info(f"已删除 {len(to_delete)} 个任务。")
 
     def _page_logs(self) -> ctk.CTkFrame:
         page = ctk.CTkFrame(self._content, fg_color="transparent")
