@@ -66,16 +66,32 @@ def _is_listen_hit_pause(pause_reason: str) -> bool:
     return "监听命中" in (pause_reason or "")
 
 
-def taskmgr_needs_attention(*, running: bool, enabled: bool, pause_reason: str = "") -> bool:
-    """监听命中或阶段提醒而暂停的任务，在任务管理页置顶展示。"""
-    if running or not enabled:
-        return False
+def _is_stage_reminder_pause(pause_reason: str) -> bool:
+    r = (pause_reason or "").strip()
+    return "阶段提醒" in r and "已自动暂停" in r
+
+
+def taskmgr_display_sort_tier(*, running: bool, enabled: bool, pause_reason: str = "") -> int:
+    """任务管理页排序层级（越小越靠前）：监听命中 > 阶段提醒 > 其它暂停 > 其余。"""
     r = (pause_reason or "").strip()
     if _is_listen_hit_pause(r):
-        return True
-    if "阶段提醒" in r and "已自动暂停" in r:
-        return True
-    return False
+        return 0
+    if running:
+        return 3
+    if not enabled:
+        return 3
+    if _is_stage_reminder_pause(r):
+        return 1
+    return 2
+
+
+def taskmgr_needs_attention(*, running: bool, enabled: bool, pause_reason: str = "") -> bool:
+    """是否置顶（监听命中含已停止；阶段提醒/其它暂停仅 enabled 且未运行）。"""
+    return taskmgr_display_sort_tier(
+        running=running,
+        enabled=enabled,
+        pause_reason=pause_reason,
+    ) < 3
 
 
 def taskmgr_sort_jobs_for_display(
@@ -83,17 +99,17 @@ def taskmgr_sort_jobs_for_display(
     *,
     is_running: Callable[[Any], bool],
 ) -> list[Any]:
-    """置顶需人工处理的暂停任务；其余保持 schedules.json 原顺序。"""
+    """置顶需人工处理的任务；同层内保持 schedules.json 原顺序。"""
     indexed = list(enumerate(jobs))
 
     def _key(item: tuple[int, Any]) -> tuple[int, int]:
         i, j = item
-        attention = taskmgr_needs_attention(
+        tier = taskmgr_display_sort_tier(
             running=is_running(j),
             enabled=bool(getattr(j, "enabled", False)),
             pause_reason=(getattr(j, "pause_reason", None) or ""),
         )
-        return (0 if attention else 1, i)
+        return (tier, i)
 
     return [j for _, j in sorted(indexed, key=_key)]
 
