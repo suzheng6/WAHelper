@@ -41,10 +41,12 @@ from schedule_account import mark_row_primary_auto, row_needs_per_group_owner
 from schedule_folder import (
     bulk_delete_job_summary,
     can_advance_folder_day,
+    entry_schedule_kind_hint,
     format_bulk_delete_confirm_message,
     format_folder_advance_line,
     folder_txt_abs_path,
     is_folder_job,
+    schedule_kind_badge,
     scan_schedule_folder,
     taskmgr_job_file_label,
 )
@@ -1653,6 +1655,7 @@ class WaPanel(ctk.CTkFrame):
         if not hasattr(self, "_s2_targets"):
             return
         sync_last_schedule_from_disk(self._cfg)
+        jobs = load_schedule2_jobs()
         for w in self._s2_targets.winfo_children():
             w.destroy()
         self._sched2_target_vars = []
@@ -1666,9 +1669,10 @@ class WaPanel(ctk.CTkFrame):
             self._sched2_target_rows.append((ent, v))
             cref = ent.chat_ref
             cref_disp = f"{cref[:48]}…" if len(cref) > 48 else cref
+            kind_hint = entry_schedule_kind_hint(jobs, ent.id)
             last_fn = (getattr(ent, "last_schedule_source_name", "") or "").strip()
             last_hint = f" · 上次任务→{last_fn}" if last_fn else " · 上次任务→为空"
-            disp = f"{ent.remark}（{cref_disp}{last_hint}）"
+            disp = f"{ent.remark}{kind_hint}（{cref_disp}{last_hint}）"
             ctk.CTkCheckBox(self._s2_targets, text=disp, variable=v, text_color=COLORS["text"]).pack(anchor="w", padx=4, pady=2)
 
     def _pick_s2_source(self) -> None:
@@ -1688,7 +1692,8 @@ class WaPanel(ctk.CTkFrame):
         return (min(a, b), max(a, b))
 
     def _s2_job_label(self, j: Schedule2Job) -> str:
-        return f"{j.source_name}（{j.row_count()} 步）"
+        tgt = schedule2_job_target_remarks(self._cfg, j)
+        return f"{tgt}{schedule_kind_badge(j)} · {j.source_name}（{j.row_count()} 步）"
 
     def _on_s2_job_pick_changed(self, _value: str) -> None:
         for j in load_schedule2_jobs():
@@ -1992,6 +1997,8 @@ class WaPanel(ctk.CTkFrame):
         info(f"已删除任务：{dead.source_name}")
         self._render_taskmgr_cards(force=True)
         self._sync_s2_job_pick_combo()
+        if hasattr(self, "_s2_targets"):
+            self._refresh_s2_target_checks()
 
     def _delete_all_s2_jobs(self) -> None:
         jobs = load_schedule2_jobs()
@@ -2018,6 +2025,8 @@ class WaPanel(ctk.CTkFrame):
             self._s2_edit_job_id = kept[0].id if kept else None
         self._render_taskmgr_cards(force=True)
         self._sync_s2_job_pick_combo()
+        if hasattr(self, "_s2_targets"):
+            self._refresh_s2_target_checks()
         if folder_kept > 0:
             info(
                 f"已删除 {len(to_delete)} 个任务"

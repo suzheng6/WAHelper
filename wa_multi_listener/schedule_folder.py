@@ -161,6 +161,33 @@ def format_bulk_delete_confirm_message(
     return msg
 
 
+def schedule_kind_badge(job: Any) -> str:
+    """任务类型短标签，用于群名后区分单 TXT 与文件夹任务。"""
+    if is_folder_job(job):
+        total = folder_day_total(job)
+        if total > 0:
+            idx = max(0, int(getattr(job, "folder_day_index", 0) or 0))
+            return f" [文件夹·第{idx + 1}/{total}天]"
+        return " [文件夹]"
+    return " [单TXT]"
+
+
+def _job_has_chat_entry(job: Any, entry_id: str) -> bool:
+    eid = str(entry_id or "").strip()
+    if not eid:
+        return False
+    ids = {str(x).strip() for x in (getattr(job, "chat_entry_ids", None) or []) if str(x).strip()}
+    return eid in ids
+
+
+def entry_schedule_kind_hint(jobs: List[Any], entry_id: str) -> str:
+    """定时任务页：某通讯录群若有对应任务，返回类型标签；无任务则返回空串。"""
+    for j in jobs:
+        if _job_has_chat_entry(j, entry_id):
+            return schedule_kind_badge(j)
+    return ""
+
+
 def taskmgr_job_file_label(job: Any) -> str:
     """任务卡片「文档：」行文案（位置不变，文件夹任务附加天数）。"""
     name = (getattr(job, "source_name", None) or "").strip() or "未命名"

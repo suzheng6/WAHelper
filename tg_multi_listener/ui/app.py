@@ -23,10 +23,12 @@ from wa_ui.taskmgr_tile_theme import (
 from schedule_folder import (
     bulk_delete_job_summary,
     can_advance_folder_day,
+    entry_schedule_kind_hint,
     format_bulk_delete_confirm_message,
     format_folder_advance_line,
     folder_txt_abs_path,
     is_folder_job,
+    schedule_kind_badge,
     scan_schedule_folder,
     taskmgr_job_file_label,
 )
@@ -1596,6 +1598,7 @@ class MainWindow(ctk.CTkFrame):
         if getattr(self, "_sched_targets", None) is None:
             return
         sync_last_schedule_from_disk(self._cfg)
+        jobs = load_jobs()
         for ch in self._sched_targets.winfo_children():
             ch.destroy()
         self._sched_target_vars = []
@@ -1609,9 +1612,10 @@ class MainWindow(ctk.CTkFrame):
             self._sched_target_rows.append((ent, v))
             owner = (ent.owner_account_id or "").strip()
             own_hint = f" · 主号→{owner}" if owner else ""
+            kind_hint = entry_schedule_kind_hint(jobs, ent.id)
             last_fn = (getattr(ent, "last_schedule_source_name", "") or "").strip()
             last_hint = f" · 上次任务→{last_fn}" if last_fn else " · 上次任务→为空"
-            disp = f"{ent.remark.strip() or ent.id}{own_hint}   （{ent.chat_ref}{last_hint}）"
+            disp = f"{ent.remark.strip() or ent.id}{own_hint}{kind_hint}   （{ent.chat_ref}{last_hint}）"
             ctk.CTkCheckBox(
                 self._sched_targets,
                 text=disp,
@@ -2795,7 +2799,10 @@ class MainWindow(ctk.CTkFrame):
         return "未设群"
 
     def _sched_job_label(self, j: ScheduledJob) -> str:
-        return f"{j.source_name} · {self._job_target_short(j)} · {j.item_count()}步 · #{j.id[:8]}"
+        return (
+            f"{self._job_target_short(j)}{schedule_kind_badge(j)} · "
+            f"{j.source_name} · {j.item_count()}步 · #{j.id[:8]}"
+        )
 
     def _on_sched_job_pick_changed(self, _value: str) -> None:
         label = self._sched_job_pick.get().strip()
@@ -2962,6 +2969,8 @@ class MainWindow(ctk.CTkFrame):
         info(f"已删除任务：{dead.source_name}")
         self._render_taskmgr_cards(force=True)
         self._sync_sched_job_pick_combo()
+        if getattr(self, "_sched_targets", None) is not None:
+            self._refresh_schedule_target_checks()
 
     def _delete_all_jobs(self) -> None:
         jobs = load_jobs()
@@ -2989,6 +2998,8 @@ class MainWindow(ctk.CTkFrame):
         self._render_jobs(full=True)
         self._render_taskmgr_cards(force=True)
         self._sync_sched_job_pick_combo()
+        if getattr(self, "_sched_targets", None) is not None:
+            self._refresh_schedule_target_checks()
         if folder_kept > 0:
             info(
                 f"已删除 {len(to_delete)} 个任务"
