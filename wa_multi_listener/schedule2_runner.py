@@ -335,6 +335,30 @@ def schedule2_job_is_running(j: Schedule2Job) -> bool:
     return bool(j.enabled) and j.state == "running"
 
 
+def schedule2_job_completed(j: Schedule2Job) -> bool:
+    return j.row_count() > 0 and j.cursor >= j.row_count()
+
+
+def bulk_resume_schedule2_counts(jobs: Optional[List[Schedule2Job]] = None) -> tuple[int, int]:
+    """返回 (可恢复数, 已完成跳过数)。"""
+    if jobs is None:
+        jobs = load_schedule2_jobs()
+    now = time.time()
+    resumable = 0
+    skipped = 0
+    for j in jobs:
+        if j.row_count() <= 0:
+            continue
+        if schedule2_job_completed(j):
+            skipped += 1
+            continue
+        if j.state == "paused":
+            resumable += 1
+        elif j.state == "running" and (j.next_send_ts <= 0 or j.next_send_ts <= now):
+            resumable += 1
+    return resumable, skipped
+
+
 def schedule2_job_status_label(j: Schedule2Job) -> str:
     if not j.enabled:
         reason = (j.pause_reason or "").strip()
@@ -636,8 +660,10 @@ class Schedule2Runner:
             save_schedule2_jobs_patch([touched])
         return changed
 
-    def _schedule_job_resume(self, j: Schedule2Job, now: float) -> None:
-        if j.cursor >= j.row_count() and j.row_count() > 0:
+    def _schedule_job_resume(
+        self, j: Schedule2Job, now: float, *, restart_if_completed: bool = False
+    ) -> None:
+        if restart_if_completed and j.cursor >= j.row_count() and j.row_count() > 0:
             j.cursor = 0
         delay = _resume_delay_seconds(j)
         j.next_send_ts = now + delay
@@ -646,12 +672,14 @@ class Schedule2Runner:
         j.state = "running"
 
     def resume_all_jobs(self) -> int:
-        """恢复暂停/已停止任务；并修复异常退出后仍为 running 但未调度的任务。"""
+        """恢复暂停中的任务（跳过已完成）；并修复异常退出后仍为 running 但未调度的任务。"""
         jobs = load_schedule2_jobs()
         now = time.time()
         n = 0
         for j in jobs:
             if j.row_count() <= 0:
+                continue
+            if schedule2_job_completed(j):
                 continue
             if not j.enabled:
                 j.enabled = True

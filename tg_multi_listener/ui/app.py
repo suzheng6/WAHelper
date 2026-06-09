@@ -87,6 +87,7 @@ from ..scheduler import (
     ScheduledJob,
     ScheduleRunner,
     advance_scheduled_folder_day,
+    bulk_resume_job_counts,
     load_jobs,
     save_jobs,
     save_jobs_patch,
@@ -2179,6 +2180,25 @@ class MainWindow(ctk.CTkFrame):
             bind_scroll_tree_once(self._taskmgr_cards, handler)
 
     def _resume_all_doc_jobs(self) -> None:
+        jobs = load_jobs()
+        resumable, skipped = bulk_resume_job_counts(jobs)
+        if resumable <= 0:
+            running = sum(1 for j in jobs if self._doc_job_is_running(j))
+            if running > 0:
+                info(
+                    f"当前 {running} 个任务已是运行中；若仍不发送，请确认账号已连接后点「保存并重载服务」。"
+                )
+            elif skipped > 0:
+                info(f"没有可恢复的暂停任务（{skipped} 个已完成任务已跳过）。")
+            else:
+                info("没有可恢复的暂停或已停止任务")
+            return
+        msg = f"将恢复 {resumable} 个暂停中的文档任务继续发送。"
+        if skipped > 0:
+            msg += f"\n\n{skipped} 个已完成的任务将被跳过（需重跑请点对应卡片）。"
+        msg += "\n\n确定继续？"
+        if not messagebox.askyesno("一键开始全部任务", msg, parent=self):
+            return
         n = self._scheduler.resume_all_jobs()
         self._cfg = load_config()
         self._refresh_schedule_target_checks()
@@ -2186,16 +2206,12 @@ class MainWindow(ctk.CTkFrame):
         self._render_jobs()
         if n > 0:
             self._warn_if_tg_session_down()
-            info(f"已恢复 {n} 个文档任务为运行中")
+            if skipped > 0:
+                info(f"已恢复 {n} 个文档任务为运行中（已跳过 {skipped} 个已完成任务）")
+            else:
+                info(f"已恢复 {n} 个文档任务为运行中")
             return
-        jobs = load_jobs()
-        running = sum(1 for j in jobs if self._doc_job_is_running(j))
-        if running > 0:
-            info(
-                f"当前 {running} 个任务已是运行中；若仍不发送，请确认账号已连接后点「保存并重载服务」。"
-            )
-        else:
-            info("没有可恢复的暂停或已停止任务")
+        info("没有可恢复的暂停或已停止任务")
 
     def _pick_schedule_source(self) -> None:
         cur = self._jfile.get() if getattr(self, "_jfile", None) else ""

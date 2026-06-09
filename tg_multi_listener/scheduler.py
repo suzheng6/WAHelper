@@ -546,6 +546,28 @@ def _delay_seconds_after_item(job: ScheduledJob, item_index: int) -> float:
     return minutes * 60.0
 
 
+def job_doc_completed(j: ScheduledJob) -> bool:
+    """文档任务是否已跑完一轮（cursor 已到末尾）。"""
+    return j.item_count() > 0 and j.cursor >= j.item_count()
+
+
+def bulk_resume_job_counts(jobs: Optional[List[ScheduledJob]] = None) -> tuple[int, int]:
+    """返回 (可恢复数, 已完成跳过数)。"""
+    if jobs is None:
+        jobs = load_jobs()
+    resumable = 0
+    skipped = 0
+    for j in jobs:
+        if j.item_count() <= 0:
+            continue
+        if job_doc_completed(j):
+            skipped += 1
+            continue
+        if j.state == "paused":
+            resumable += 1
+    return resumable, skipped
+
+
 def _clamp_remain_seconds(secs: float) -> float:
     return max(0.0, float(secs))
 
@@ -666,19 +688,19 @@ class ScheduleRunner:
         return changed
 
     def resume_all_jobs(self) -> int:
-        """恢复所有暂停或已自动停止的文档任务。"""
+        """恢复所有暂停中的文档任务（跳过已完成；重跑请点单卡「重新开始」）。"""
         jobs = load_jobs()
         now = time.time()
         touched: List[ScheduledJob] = []
         for j in jobs:
+            if j.item_count() <= 0:
+                continue
+            if job_doc_completed(j):
+                continue
             if not j.enabled:
-                if j.item_count() <= 0:
-                    continue
                 j.enabled = True
             if j.state != "paused":
                 continue
-            if j.cursor >= j.item_count() and j.item_count() > 0:
-                j.cursor = 0
             delay = _resume_delay_seconds(j)
             j.next_send_ts = now + delay
             j.remaining_seconds = 0.0
