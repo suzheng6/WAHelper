@@ -39,11 +39,12 @@ from paths import app_root, resource_path
 from schedule_txt_import import import_doc_items
 from schedule_account import mark_row_primary_auto, row_needs_per_group_owner
 from schedule_folder import (
+    bulk_delete_job_summary,
     can_advance_folder_day,
+    format_bulk_delete_confirm_message,
     format_folder_advance_line,
     folder_txt_abs_path,
     is_folder_job,
-    job_eligible_for_bulk_delete,
     scan_schedule_folder,
     taskmgr_job_file_label,
 )
@@ -1997,22 +1998,19 @@ class WaPanel(ctk.CTkFrame):
         if not jobs:
             info("当前没有可删除的任务。")
             return
-        to_delete = [j for j in jobs if job_eligible_for_bulk_delete(j)]
-        kept = [j for j in jobs if not job_eligible_for_bulk_delete(j)]
+        single_txt, folder_done, folder_kept, to_delete, kept = bulk_delete_job_summary(jobs)
         if not to_delete:
-            info("没有可批量删除的任务（仅删除单 TXT 任务，或文件夹任务全部天数已发完）。")
-            if kept:
-                info(f"保留 {len(kept)} 个未完成的文件夹任务。")
+            info("没有可批量删除的任务（仅删除单 TXT，或文件夹任务全部天数已发完）。")
+            if folder_kept > 0:
+                info(f"保留 {folder_kept} 个进行中的文件夹任务。")
             return
-        msg = (
-            f"将删除 {len(to_delete)} 个任务"
-            f"（单 TXT 或文件夹全部天数已发完）。"
+        msg = format_bulk_delete_confirm_message(
+            single_txt=single_txt,
+            folder_done=folder_done,
+            folder_kept=folder_kept,
+            total_delete=len(to_delete),
         )
-        if kept:
-            msg += f"\n\n保留 {len(kept)} 个未完成的文件夹任务。"
-        msg += "\n\n确定继续？"
-        ok = messagebox.askyesno("确认删除", msg, parent=self)
-        if not ok:
+        if not messagebox.askyesno("一键删除任务", msg, parent=self):
             return
         save_schedule2_jobs(kept)
         deleted_ids = {j.id for j in to_delete}
@@ -2020,10 +2018,14 @@ class WaPanel(ctk.CTkFrame):
             self._s2_edit_job_id = kept[0].id if kept else None
         self._render_taskmgr_cards(force=True)
         self._sync_s2_job_pick_combo()
-        if kept:
-            info(f"已删除 {len(to_delete)} 个任务，保留 {len(kept)} 个未完成的文件夹任务。")
+        if folder_kept > 0:
+            info(
+                f"已删除 {len(to_delete)} 个任务"
+                f"（单 TXT {single_txt}，已完成文件夹 {folder_done}），"
+                f"保留 {folder_kept} 个进行中的文件夹任务。"
+            )
         else:
-            info(f"已删除 {len(to_delete)} 个任务。")
+            info(f"已删除 {len(to_delete)} 个任务（单 TXT {single_txt}，已完成文件夹 {folder_done}）。")
 
     def _s2_bulk_replace(self) -> None:
         jobs = load_schedule2_jobs()

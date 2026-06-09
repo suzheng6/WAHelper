@@ -63,7 +63,13 @@ def read_folder_txt_utf8(folder_path: str, rel_name: str) -> Tuple[str, str]:
 
 
 def is_folder_job(job: Any) -> bool:
-    return str(getattr(job, "source_kind", "file") or "file").strip() == "folder"
+    kind = str(getattr(job, "source_kind", "file") or "file").strip()
+    if kind == "folder":
+        return True
+    # 兼容旧数据：有 folder_files 即视为文件夹任务
+    files = getattr(job, "folder_files", None) or []
+    path = str(getattr(job, "folder_path", "") or "").strip()
+    return bool(files) and bool(path)
 
 
 def folder_day_total(job: Any) -> int:
@@ -113,6 +119,46 @@ def job_eligible_for_bulk_delete(job: Any) -> bool:
     if not is_folder_job(job):
         return True
     return is_folder_job_fully_completed(job)
+
+
+def bulk_delete_job_summary(jobs: List[Any]) -> tuple[int, int, int, List[Any], List[Any]]:
+    """返回 (单TXT数, 已完成文件夹数, 保留文件夹数, 待删列表, 保留列表)。"""
+    to_delete: List[Any] = []
+    kept: List[Any] = []
+    single_txt = 0
+    folder_done = 0
+    folder_kept = 0
+    for j in jobs:
+        if job_eligible_for_bulk_delete(j):
+            to_delete.append(j)
+            if is_folder_job(j):
+                folder_done += 1
+            else:
+                single_txt += 1
+        else:
+            kept.append(j)
+            if is_folder_job(j):
+                folder_kept += 1
+    return single_txt, folder_done, folder_kept, to_delete, kept
+
+
+def format_bulk_delete_confirm_message(
+    *,
+    single_txt: int,
+    folder_done: int,
+    folder_kept: int,
+    total_delete: int,
+) -> str:
+    parts: List[str] = [f"将删除 {total_delete} 个任务："]
+    if single_txt > 0:
+        parts.append(f"· {single_txt} 个单 TXT 文档任务")
+    if folder_done > 0:
+        parts.append(f"· {folder_done} 个已全部发完的文件夹任务")
+    msg = "\n".join(parts)
+    if folder_kept > 0:
+        msg += f"\n\n保留 {folder_kept} 个进行中的文件夹任务（未发完所有天数）。"
+    msg += "\n\n确定继续？"
+    return msg
 
 
 def taskmgr_job_file_label(job: Any) -> str:
