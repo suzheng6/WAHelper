@@ -1846,7 +1846,7 @@ class MainWindow(ctk.CTkFrame):
         )
         ctk.CTkLabel(
             wrap,
-            text="每个任务一张卡片：绿色=运行中，金色=监听暂停，红色=其它暂停，灰色=已停止。点击卡片可切换运行/暂停。",
+            text="每个任务一张卡片：绿色=运行中，金色=监听暂停，紫色=提醒+监听，红色=其它暂停，灰色=已停止。点击卡片可切换运行/暂停。",
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",

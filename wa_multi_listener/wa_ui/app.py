@@ -54,6 +54,7 @@ from schedule2_runner import (
     Schedule2Job,
     Schedule2Row,
     Schedule2Runner,
+    LISTEN_HIT_PAUSE_REASON_S2,
     advance_schedule2_folder_day,
     bulk_resume_schedule2_counts,
     load_schedule2_jobs,
@@ -262,7 +263,7 @@ class WaPanel(ctk.CTkFrame):
             chat_key = str(p.get("chat_key", ""))
             paused = self._schedule2.pause_by_chat(
                 chat_key,
-                "监听命中目标用户，自动暂停",
+                LISTEN_HIT_PAUSE_REASON_S2,
                 event_title=str(p.get("chat_title", "")),
             )
             if paused > 0:
@@ -1278,7 +1279,7 @@ class WaPanel(ctk.CTkFrame):
         )
         ctk.CTkLabel(
             inner,
-            text="每个任务一张卡片：绿色=运行中，金色=监听暂停，红色=其它暂停，灰色=已停止。点击卡片可切换运行/暂停。",
+            text="每个任务一张卡片：绿色=运行中，金色=监听暂停，紫色=提醒+监听，红色=其它暂停，灰色=已停止。点击卡片可切换运行/暂停。",
             text_color=COLORS["muted"],
             wraplength=700,
             justify="left",
