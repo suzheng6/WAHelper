@@ -31,7 +31,7 @@ from schedule_account import (
 )
 from scheduler import DocMessage
 from wa_jid import chat_matches_keys, jid_from_chat_key, keys_for_chat_ref
-from wa_send import send_text_to_chats
+from wa_send import send_text_to_chat, send_text_to_chats
 from watch_read_tracker import WaWatchReadTracker, mark_watch_read_before_send
 
 
