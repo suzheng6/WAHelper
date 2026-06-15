@@ -28,14 +28,13 @@ from .logger_util import error, info, warning
 from .watch_read_tracker import TgWatchReadTracker, mark_watch_read_before_send
 
 
-async def send_telegram_message_resilient(client: TelegramClient, entity: Any, text: str, *, attempts: int = 6) -> None:
+async def send_telegram_message_resilient(client: TelegramClient, entity: Any, text: str, *, attempts: int = 6) -> Any:
     """发送消息；遇 session SQLite「database is locked」时短暂退避重试（多开/外占库时常见）。"""
     delay = 0.2
     last: Optional[BaseException] = None
     for i in range(max(1, attempts)):
         try:
-            await client.send_message(entity, text)
-            return
+            return await client.send_message(entity, text)
         except Exception as exc:
             last = exc
             msg = str(exc).lower()
@@ -84,6 +83,7 @@ class DocMessage:
     send_as_account_id: str = ""
     """True 表示本条 间隔= 来自 TXT；否则发完后用任务级固定间隔。"""
     interval_from_txt: bool = False
+    want_reactions: bool = False
 
     def effective_send_account_id(self) -> str:
         return (self.send_as_account_id or self.original_account_id or self.account_id or "").strip()
@@ -195,6 +195,7 @@ def _doc_from_dict(x: Dict[str, Any], *, legacy_gap_min: float = 5.0, legacy_gap
         hi = max(lo, float(legacy_gap_max))
         delay_m = random.uniform(lo, hi) if hi > lo else lo
     from_txt = bool(x.get("interval_from_txt", False))
+    want_rx = bool(x.get("want_reactions", False))
     if is_rem:
         return DocMessage(
             account_id=acc,
@@ -205,6 +206,7 @@ def _doc_from_dict(x: Dict[str, Any], *, legacy_gap_min: float = 5.0, legacy_gap
             original_account_id=orig,
             send_as_account_id=send,
             interval_from_txt=from_txt,
+            want_reactions=want_rx,
         )
     if acc and txt:
         return DocMessage(
@@ -216,6 +218,7 @@ def _doc_from_dict(x: Dict[str, Any], *, legacy_gap_min: float = 5.0, legacy_gap
             original_account_id=orig or acc,
             send_as_account_id=send or orig or acc,
             interval_from_txt=from_txt,
+            want_reactions=want_rx,
         )
     return None
 
@@ -259,6 +262,7 @@ def migrate_schedule2_into_schedules_once() -> int:
                     original_account_id=r.original_account_id,
                     send_as_account_id=r.send_as_account_id,
                     interval_from_txt=False,
+                    want_reactions=bool(getattr(r, "want_reactions", False)),
                 )
             )
         if not items:
@@ -782,9 +786,13 @@ class ScheduleRunner:
                 changed = True
             effective = reason
             if reason == LISTEN_HIT_PAUSE_REASON:
-                from wa_ui.taskmgr_tile_theme import compose_listen_pause_reason
+                from wa_ui.taskmgr_tile_theme import resolve_listen_pause_reason
 
-                effective = compose_listen_pause_reason(j.pause_reason, reason)
+                effective = resolve_listen_pause_reason(
+                    enabled=j.enabled,
+                    previous_reason=j.pause_reason,
+                    listen_reason=reason,
+                )
             if j.pause_reason != effective:
                 j.pause_reason = effective
                 changed = True
@@ -928,7 +936,15 @@ class ScheduleRunner:
                     from .group_owner import send_account_for_job_item
 
                     acc_send = send_account_for_job_item(cfg, j, item)
-                    ok = await self._send_one_to_many(targets, acc_send, item.content, job_id=j.id)
+                    ok = await self._send_one_to_many(
+                        targets,
+                        acc_send,
+                        item.content,
+                        job_id=j.id,
+                        want_reactions=bool(getattr(item, "want_reactions", False)),
+                        job=j,
+                        cfg=cfg,
+                    )
                     sent_idx = j.cursor
                     if ok:
                         j.cursor += 1
@@ -967,6 +983,9 @@ class ScheduleRunner:
         content: str,
         *,
         job_id: str = "",
+        want_reactions: bool = False,
+        job: Optional[ScheduledJob] = None,
+        cfg: Optional[AppConfig] = None,
     ) -> bool:
         account_id = (account_id or "").strip()
         if not self._api_id or not self._api_hash.strip():
@@ -994,14 +1013,36 @@ class ScheduleRunner:
                     warning(f"文档任务发送跳过：账号 {account_id} 未登录")
                     return False
                 ok = False
+                enabled_ids = {aid for aid, a in self._accounts.items() if a.enabled}
                 for cref in chat_refs:
                     try:
                         entity = await _resolve_entity_for_send(client, cref)
                         await mark_watch_read_before_send(
                             client, account_id, entity, self._read_tracker
                         )
-                        await send_telegram_message_resilient(client, entity, content)
+                        from send_typing_util import telegram_typing_before_send
+
+                        await telegram_typing_before_send(client, entity, content)
+                        msg = await send_telegram_message_resilient(client, entity, content)
                         ok = True
+                        if want_reactions and msg is not None and cfg is not None and job is not None:
+                            from schedule_reactions import (
+                                resolve_main_account_for_job_target,
+                                schedule_telegram_reactions,
+                            )
+
+                            main_acc = resolve_main_account_for_job_target(cfg, job, cref)
+                            n_rx = schedule_telegram_reactions(
+                                shared_clients=shared,
+                                account_locks=self._account_locks,
+                                chat_ref=cref,
+                                msg_id=int(getattr(msg, "id", 0) or 0),
+                                sender_account_id=account_id,
+                                main_account_id=main_acc,
+                                enabled_account_ids=enabled_ids,
+                            )
+                            if n_rx:
+                                info(f"文档任务点赞：任务={job_id} 群={cref} 已排程={n_rx}（各账号 1–10 分钟后）")
                     except Exception as exc:
                         hint = ""
                         if "Could not find the input entity" in str(exc) or "PeerChannel" in str(exc):

@@ -585,6 +585,9 @@ class Schedule2Runner:
                         await mark_watch_read_before_send(
                             client, account_id, entity, self._read_tracker
                         )
+                        from send_typing_util import telegram_typing_before_send
+
+                        await telegram_typing_before_send(client, entity, content)
                         await send_telegram_message_resilient(client, entity, content)
                         ok = True
                     except Exception as exc:

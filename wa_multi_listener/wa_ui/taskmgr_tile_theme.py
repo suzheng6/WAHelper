@@ -6,7 +6,9 @@ from typing import Any, TypedDict
 
 import customtkinter as ctk
 
-TaskmgrBucket = str  # running | listen_pause | stage_listen_pause | other_pause | stopped
+TaskmgrBucket = str  # running | listen_pause | stage_listen_pause | stopped_listen_pause | other_pause | stopped
+
+STOPPED_LISTEN_HIT_PAUSE_REASON = "已停止任务监听命中，请关注"
 
 _TASKMGR_FONTS: dict[str, ctk.CTkFont] | None = None
 
@@ -62,6 +64,17 @@ _STAGE_LISTEN_PAUSE: TaskmgrTilePalette = {
     "hint": "#ececec",
 }
 
+# 已停止任务再被监听命中：青蓝，与金色「运行中监听」、紫色「提醒+监听」区分
+_STOPPED_LISTEN_PAUSE: TaskmgrTilePalette = {
+    "fg": "#123a4a",
+    "border": "#1abc9c",
+    "status": "#b8fff0",
+    "body": "#e0faf5",
+    "file": "#a8e8dc",
+    "title": "#ffffff",
+    "hint": "#ececec",
+}
+
 _OTHER_PAUSE: TaskmgrTilePalette = {
     "fg": "#5c2424",
     "border": "#e74c3c",
@@ -73,9 +86,16 @@ _OTHER_PAUSE: TaskmgrTilePalette = {
 }
 
 
-def _is_listen_hit_pause(pause_reason: str) -> bool:
+def _is_stopped_listen_pause(pause_reason: str) -> bool:
     r = (pause_reason or "").strip()
     if _is_stage_listen_pause(r):
+        return False
+    return "已停止" in r and "监听命中" in r
+
+
+def _is_listen_hit_pause(pause_reason: str) -> bool:
+    r = (pause_reason or "").strip()
+    if _is_stage_listen_pause(r) or _is_stopped_listen_pause(r):
         return False
     return "监听命中" in r
 
@@ -100,10 +120,17 @@ def compose_listen_pause_reason(previous_reason: str, listen_reason: str) -> str
     return (listen_reason or "").strip() or "监听命中目标用户，自动暂停"
 
 
+def resolve_listen_pause_reason(*, enabled: bool, previous_reason: str, listen_reason: str) -> str:
+    """根据任务是否仍在启用，生成监听命中后的暂停原因文案。"""
+    if not enabled:
+        return STOPPED_LISTEN_HIT_PAUSE_REASON
+    return compose_listen_pause_reason(previous_reason, listen_reason)
+
+
 def taskmgr_display_sort_tier(*, running: bool, enabled: bool, pause_reason: str = "") -> int:
     """任务管理页排序层级（越小越靠前）：监听/提醒+监听 > 阶段提醒 > 其它暂停 > 其余。"""
     r = (pause_reason or "").strip()
-    if _is_stage_listen_pause(r) or _is_listen_hit_pause(r):
+    if _is_stage_listen_pause(r) or _is_stopped_listen_pause(r) or _is_listen_hit_pause(r):
         return 0
     if running:
         return 3
@@ -148,6 +175,8 @@ def taskmgr_job_bucket(*, running: bool, enabled: bool, pause_reason: str = "") 
         return "running"
     if _is_stage_listen_pause(pause_reason):
         return "stage_listen_pause"
+    if _is_stopped_listen_pause(pause_reason):
+        return "stopped_listen_pause"
     if _is_listen_hit_pause(pause_reason):
         return "listen_pause"
     if not enabled:
@@ -161,6 +190,8 @@ def taskmgr_tile_palette(*, running: bool, enabled: bool, pause_reason: str = ""
         return dict(_RUNNING)
     if bucket == "stage_listen_pause":
         return dict(_STAGE_LISTEN_PAUSE)
+    if bucket == "stopped_listen_pause":
+        return dict(_STOPPED_LISTEN_PAUSE)
     if bucket == "listen_pause":
         return dict(_LISTEN_PAUSE)
     if bucket == "stopped":
@@ -173,7 +204,15 @@ def taskmgr_count_jobs(
     *,
     is_running: Callable[[Any], bool],
 ) -> dict[str, int]:
-    counts = {"total": 0, "running": 0, "listen_pause": 0, "stage_listen_pause": 0, "other_pause": 0, "stopped": 0}
+    counts = {
+        "total": 0,
+        "running": 0,
+        "listen_pause": 0,
+        "stage_listen_pause": 0,
+        "stopped_listen_pause": 0,
+        "other_pause": 0,
+        "stopped": 0,
+    }
     for j in jobs:
         counts["total"] += 1
         bucket = taskmgr_job_bucket(
@@ -193,6 +232,7 @@ def format_taskmgr_count_summary(counts: dict[str, int]) -> str:
     for key, label in (
         ("running", "运行中"),
         ("stage_listen_pause", "提醒+监听"),
+        ("stopped_listen_pause", "已停+监听"),
         ("listen_pause", "监听暂停"),
         ("other_pause", "其它暂停"),
         ("stopped", "已停止"),

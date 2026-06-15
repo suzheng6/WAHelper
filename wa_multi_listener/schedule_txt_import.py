@@ -34,6 +34,23 @@ def _split_blocks(text: str) -> List[str]:
 _KV_LINE = re.compile(r"^([^:：=＝]+)\s*[:：=＝]\s*(.*)$")
 _REMINDER_HEAD = re.compile(r"^[!！]\s*提醒\s*[!！]\s*$", re.IGNORECASE)
 _DELAY_KEYS = frozenset({"间隔", "interval", "延迟", "delay", "间隔分钟", "等待", "等待分钟"})
+_REACTION_KEYS = frozenset({"点赞", "like", "反应", "react"})
+_REACTION_ONLY_LINE = re.compile(r"^\s*点赞\s*$", re.IGNORECASE)
+
+
+def _is_reaction_flag_line(s: str) -> bool:
+    if _REACTION_ONLY_LINE.match(s):
+        return True
+    m = _KV_LINE.match(s)
+    if not m:
+        return False
+    k = _norm_key(m.group(1))
+    if k not in _REACTION_KEYS:
+        return False
+    v = m.group(2).strip().lower()
+    if not v:
+        return True
+    return v in ("1", "yes", "true", "是", "y", "on", "点赞")
 
 
 def _parse_delay_minutes_value(v: str) -> Optional[float]:
@@ -112,6 +129,7 @@ def _parse_block(block: str) -> Tuple[Optional[DocMessage], Optional[str]]:
     account = ""
     content = ""
     delay_m: Optional[float] = None
+    want_reactions = False
     i = 0
     in_multi = False
     multi: List[str] = []
@@ -120,6 +138,10 @@ def _parse_block(block: str) -> Tuple[Optional[DocMessage], Optional[str]]:
         raw = lines[i]
         s = raw.strip()
         if not s or s.startswith("#") or s.startswith("//"):
+            i += 1
+            continue
+        if _is_reaction_flag_line(s):
+            want_reactions = True
             i += 1
             continue
         if in_multi:
@@ -170,6 +192,7 @@ def _parse_block(block: str) -> Tuple[Optional[DocMessage], Optional[str]]:
             is_reminder=False,
             reminder_note="",
             delay_after_minutes=delay_m,
+            want_reactions=want_reactions,
         ),
         None,
     )

@@ -45,6 +45,7 @@ class Schedule2Row:
     reminder_note: str = ""
     """本条执行完后的等待分钟数；None 表示使用任务界面默认间隔（随机）。"""
     delay_after_minutes: Optional[float] = None
+    want_reactions: bool = False
 
 
 @dataclass
@@ -123,6 +124,7 @@ def _row_from_dict(d: Dict[str, Any]) -> Optional[Schedule2Row]:
         is_reminder=bool(d.get("is_reminder", False)),
         reminder_note=str(d.get("reminder_note", "") or ""),
         delay_after_minutes=_delay_minutes_from_raw(d.get("delay_after_minutes")),
+        want_reactions=bool(d.get("want_reactions", False)),
     )
 
 
@@ -244,6 +246,7 @@ def _doc_items_to_s2_rows(items: List[DocMessage]) -> List[Schedule2Row]:
                 is_reminder=it.is_reminder,
                 reminder_note=it.reminder_note,
                 delay_after_minutes=it.delay_after_minutes,
+                want_reactions=bool(getattr(it, "want_reactions", False)),
             )
         )
     return rows
@@ -580,7 +583,9 @@ class Schedule2Runner:
             if not targets:
                 return False
             acc = resolve_send_account_id(row, "", owners, self._accounts)
-            return await self._send_one_to_many(targets, acc, row.content)
+            return await self._send_one_to_many(
+                targets, acc, row.content, want_reactions=row.want_reactions, main_account_id=""
+            )
 
         if row_needs_per_group_owner([row]):
             for eid in entry_ids:
@@ -601,7 +606,13 @@ class Schedule2Runner:
                 warning(f"定时任务：群「{ent.remark}」未解析到发送账号（原文={row.original_account_id}）")
                 all_ok = False
                 continue
-            ok = await self._send_one_to_many([ent.chat_ref.strip()], acc_send, row.content)
+            ok = await self._send_one_to_many(
+                [ent.chat_ref.strip()],
+                acc_send,
+                row.content,
+                want_reactions=row.want_reactions,
+                main_account_id=owners.get(eid, ""),
+            )
             any_ok = any_ok or ok
             if not ok:
                 all_ok = False
@@ -724,9 +735,13 @@ class Schedule2Runner:
                 changed = True
             effective = reason
             if reason == LISTEN_HIT_PAUSE_REASON_S2:
-                from wa_ui.taskmgr_tile_theme import compose_listen_pause_reason
+                from wa_ui.taskmgr_tile_theme import resolve_listen_pause_reason
 
-                effective = compose_listen_pause_reason(j.pause_reason, reason)
+                effective = resolve_listen_pause_reason(
+                    enabled=j.enabled,
+                    previous_reason=j.pause_reason,
+                    listen_reason=reason,
+                )
             if j.pause_reason != effective:
                 j.pause_reason = effective
                 changed = True
@@ -859,7 +874,15 @@ class Schedule2Runner:
                 error(f"定时任务循环异常：{exc}")
                 await asyncio.sleep(1.5)
 
-    async def _send_one_to_many(self, chat_refs: List[str], account_id: str, content: str) -> bool:
+    async def _send_one_to_many(
+        self,
+        chat_refs: List[str],
+        account_id: str,
+        content: str,
+        *,
+        want_reactions: bool = False,
+        main_account_id: str = "",
+    ) -> bool:
         account_id = (account_id or "").strip()
         self.refresh_accounts()
         acc = self._accounts.get(account_id)
@@ -884,10 +907,27 @@ class Schedule2Runner:
         async with lock:
             try:
                 ok = False
+                enabled_ids = {aid for aid, a in self._accounts.items() if a.enabled}
                 for cref in chat_refs:
                     await mark_watch_read_before_send(client, account_id, cref, self._read_tracker)
-                    if await send_text_to_chats(client, [cref], content):
+                    sent_ok, meta = await send_text_to_chat(client, cref, content)
+                    if sent_ok:
                         ok = True
+                    if want_reactions and meta is not None:
+                        from schedule_reactions import schedule_whatsapp_reactions
+
+                        n_rx = schedule_whatsapp_reactions(
+                            shared_clients=shared,
+                            account_locks=self._account_locks,
+                            chat_jid=meta.chat_jid,
+                            message_id=meta.message_id,
+                            target_sender_jid=meta.sender_jid,
+                            sender_account_id=account_id,
+                            main_account_id=main_account_id,
+                            enabled_account_ids=enabled_ids,
+                        )
+                        if n_rx:
+                            info(f"定时任务点赞：群={cref} 已排程={n_rx}（各账号 1–10 分钟后）")
                 return ok
             except Exception as exc:
                 error(f"定时任务发送异常：账号={account_id} 错误={exc}")

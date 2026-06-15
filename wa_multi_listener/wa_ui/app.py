@@ -1788,6 +1788,7 @@ class WaPanel(ctk.CTkFrame):
                     is_reminder=it.is_reminder,
                     reminder_note=it.reminder_note,
                     delay_after_minutes=it.delay_after_minutes,
+                    want_reactions=bool(getattr(it, "want_reactions", False)),
                 )
             )
         by_eid = {e.id: e for e in self._cfg.address_book}
@@ -1865,6 +1866,7 @@ class WaPanel(ctk.CTkFrame):
                     is_reminder=it.is_reminder,
                     reminder_note=it.reminder_note,
                     delay_after_minutes=it.delay_after_minutes,
+                    want_reactions=bool(getattr(it, "want_reactions", False)),
                 )
             )
         by_eid = {e.id: e for e in self._cfg.address_book}

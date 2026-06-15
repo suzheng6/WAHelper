@@ -33,6 +33,7 @@ class DocMessage:
     reminder_note: str = ""
     """本条执行完后的等待分钟数；None 表示使用任务界面上的默认间隔。"""
     delay_after_minutes: Optional[float] = None
+    want_reactions: bool = False
 
 
 @dataclass

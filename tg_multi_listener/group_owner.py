@@ -41,6 +41,7 @@ def clone_doc_items(items: List[DocMessage]) -> List[DocMessage]:
                 original_account_id=it.original_account_id,
                 send_as_account_id=it.send_as_account_id,
                 interval_from_txt=it.interval_from_txt,
+                want_reactions=it.want_reactions,
             )
         )
     return out
