@@ -3,8 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Set, Tuple, Union
 
 from logger_util import debug, error, info, warning
 
@@ -49,14 +48,6 @@ def pick_reaction_accounts(
         return []
     count = random.randint(1, min(2, len(pool)))
     return random.sample(pool, count)
-
-
-@dataclass
-class WaSentMessageMeta:
-    chat_ref: str
-    chat_jid: Any
-    message_id: str
-    sender_jid: Any
 
 
 def _track_reaction_task(task: asyncio.Task[Any]) -> None:
@@ -174,95 +165,8 @@ def schedule_telegram_reactions(
     return scheduled
 
 
-async def whatsapp_react_once(
-    client: Any,
-    chat_jid: Any,
-    target_sender_jid: Any,
-    message_id: str,
-    emoji: str,
-) -> None:
-    reaction_msg = await client.build_reaction(chat_jid, target_sender_jid, message_id, emoji)
-    await client.send_message(chat_jid, reaction_msg)
-
-
-async def _run_whatsapp_reaction_delayed(
-    *,
-    shared_clients: Dict[str, Any],
-    account_locks: Dict[str, asyncio.Lock],
-    chat_jid: Any,
-    message_id: str,
-    target_sender_jid: Any,
-    acc_id: str,
-    label: str,
-    delay_sec: float,
-) -> None:
-    emoji = reaction_emoji_for_role_label(label)
-    try:
-        await asyncio.sleep(delay_sec)
-        client = shared_clients.get(acc_id)
-        if client is None:
-            warning(f"定时点赞跳过：账号 {acc_id} 未连接（延迟后）")
-            return
-        lock = account_locks.get(acc_id)
-        if lock is None:
-            lock = asyncio.Lock()
-            account_locks[acc_id] = lock
-        async with lock:
-            await whatsapp_react_once(client, chat_jid, target_sender_jid, message_id, emoji)
-        info(f"定时点赞完成：账号={acc_id} 表情={emoji} 延迟={delay_sec / 60:.1f} 分钟")
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:
-        error(f"定时点赞失败：账号={acc_id} 表情={emoji} 错误={exc}")
-
-
-def schedule_whatsapp_reactions(
-    *,
-    shared_clients: Dict[str, Any],
-    account_locks: Dict[str, asyncio.Lock],
-    chat_jid: Any,
-    message_id: str,
-    target_sender_jid: Any,
-    sender_account_id: str,
-    main_account_id: str,
-    enabled_account_ids: Set[str],
-) -> int:
-    """为每条消息排程延迟点赞；立即返回，各账号独立随机 1–10 分钟后执行。"""
-    reactors = pick_reaction_accounts(
-        sender_account_id=sender_account_id,
-        main_account_id=main_account_id,
-        available_account_ids=enabled_account_ids,
-    )
-    if not reactors:
-        debug("定时点赞跳过：无可用点赞账号")
-        return 0
-    scheduled = 0
-    for label, acc_id in reactors:
-        if shared_clients.get(acc_id) is None:
-            warning(f"定时点赞跳过：账号 {acc_id} 未连接")
-            continue
-        delay_sec = reaction_delay_seconds()
-        task = asyncio.create_task(
-            _run_whatsapp_reaction_delayed(
-                shared_clients=shared_clients,
-                account_locks=account_locks,
-                chat_jid=chat_jid,
-                message_id=message_id,
-                target_sender_jid=target_sender_jid,
-                acc_id=acc_id,
-                label=label,
-                delay_sec=delay_sec,
-            )
-        )
-        _track_reaction_task(task)
-        scheduled += 1
-        info(f"定时点赞已排程：账号={acc_id} 表情={reaction_emoji_for_role_label(label)} 约 {delay_sec / 60:.1f} 分钟后")
-    return scheduled
-
-
 # 兼容旧调用名（现为排程，非立即执行）
 apply_telegram_scheduled_reactions = schedule_telegram_reactions
-apply_whatsapp_scheduled_reactions = schedule_whatsapp_reactions
 
 
 def resolve_main_account_for_job_target(cfg: Any, job: Any, chat_ref: Any) -> str:

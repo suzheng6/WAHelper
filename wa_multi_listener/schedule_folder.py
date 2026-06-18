@@ -50,8 +50,32 @@ def folder_txt_abs_path(folder_path: str, rel_name: str) -> str:
     return os.path.join(os.path.abspath(folder_path), rel_name)
 
 
+def resolve_folder_day_filename(folder_path: str, rel_name: str) -> str:
+    """按天数编号匹配磁盘上的实际 TXT 名（兼容「3灰飞」与「3 灰飞」等差异）。"""
+    root = os.path.abspath((folder_path or "").strip())
+    rel = (rel_name or "").strip()
+    if not root or not rel:
+        return rel_name
+    if os.path.isfile(os.path.join(root, rel)):
+        return rel
+    stem = os.path.splitext(rel)[0]
+    m = _FOLDER_TXT_NUM.match(stem)
+    if not m or not os.path.isdir(root):
+        return rel
+    day = m.group(1)
+    for name in os.listdir(root):
+        if not name.lower().endswith(".txt"):
+            continue
+        ns = os.path.splitext(name)[0]
+        nm = _FOLDER_TXT_NUM.match(ns)
+        if nm and nm.group(1) == day:
+            return name
+    return rel
+
+
 def read_folder_txt_utf8(folder_path: str, rel_name: str) -> Tuple[str, str]:
     """返回 (文本内容, 错误信息)。"""
+    rel_name = resolve_folder_day_filename(folder_path, rel_name)
     path = folder_txt_abs_path(folder_path, rel_name)
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -85,6 +109,24 @@ def can_advance_folder_day(job: Any) -> bool:
         return False
     idx = int(getattr(job, "folder_day_index", 0) or 0)
     return idx < total - 1
+
+
+def split_folder_jobs_for_bulk_advance(jobs: List[Any]) -> Tuple[List[Any], List[Any]]:
+    """一键下一天：返回 (可进入下一天, 已在最后一天将删除)。"""
+    advanceable: List[Any] = []
+    at_last_day: List[Any] = []
+    for j in jobs:
+        if not is_folder_job(j):
+            continue
+        if can_advance_folder_day(j):
+            advanceable.append(j)
+        else:
+            at_last_day.append(j)
+    return advanceable, at_last_day
+
+
+def format_folder_last_day_delete_line(*, target_label: str, current_name: str, day_one_based: int, total_days: int) -> str:
+    return f"· {target_label}：{current_name}（第 {day_one_based}/{total_days} 天，无下一天，将删除）"
 
 
 def _job_step_count(job: Any) -> int:

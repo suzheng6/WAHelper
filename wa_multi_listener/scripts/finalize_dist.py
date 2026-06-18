@@ -8,19 +8,28 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST = os.path.join(ROOT, "dist")
 OUT = os.path.join(DIST, os.environ.get("WA_COLLECT_NAME", "WAHelper"))
 SRC = os.path.join(OUT, "WAHelper.exe")
-DST_NAMES = ("超群小帮手.exe", "WhatsApp监听助手.exe")
+DST_CN = os.path.join(OUT, "超群小帮手.exe")
 DLL_NAME = "neonize-windows-amd64.dll"
+LEGACY_EXE_NAMES = ("WhatsApp监听助手.exe",)
 
 
 def main() -> int:
-    if not os.path.isfile(SRC):
+    if os.path.isfile(SRC):
+        if os.path.isfile(DST_CN):
+            os.remove(DST_CN)
+        os.replace(SRC, DST_CN)
+        print(f"已生成：{DST_CN}")
+    elif os.path.isfile(DST_CN):
+        print(f"已存在：{DST_CN}")
+    else:
         print(f"未找到构建产物：{SRC}")
         return 1
 
-    for dst_name in DST_NAMES:
-        dst = os.path.join(OUT, dst_name)
-        shutil.copy2(SRC, dst)
-        print(f"已生成：{dst}")
+    for legacy in LEGACY_EXE_NAMES:
+        legacy_path = os.path.join(OUT, legacy)
+        if os.path.isfile(legacy_path):
+            os.remove(legacy_path)
+            print(f"已移除旧版程序：{legacy_path}")
 
     patched = os.path.join(ROOT, DLL_NAME)
     if os.path.isfile(patched):

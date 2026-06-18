@@ -282,10 +282,13 @@ def advance_schedule2_folder_day(job: Schedule2Job, cfg: AppConfig) -> tuple[boo
     if not can_advance_folder_day(job):
         return False, "已是最后一天或不是文件夹任务"
     next_index = int(job.folder_day_index) + 1
-    rel = job.folder_files[next_index]
+    from schedule_folder import resolve_folder_day_filename
+
+    rel = resolve_folder_day_filename(job.folder_path, job.folder_files[next_index])
     ok, err = _reload_folder_day_items_s2(job, cfg, rel)
     if not ok:
         return False, err
+    job.folder_files[next_index] = rel
     job.folder_day_index = next_index
     job.cursor = 0
     job.enabled = True
@@ -584,7 +587,7 @@ class Schedule2Runner:
                 return False
             acc = resolve_send_account_id(row, "", owners, self._accounts)
             return await self._send_one_to_many(
-                targets, acc, row.content, want_reactions=row.want_reactions, main_account_id=""
+                targets, acc, row.content
             )
 
         if row_needs_per_group_owner([row]):
@@ -610,8 +613,6 @@ class Schedule2Runner:
                 [ent.chat_ref.strip()],
                 acc_send,
                 row.content,
-                want_reactions=row.want_reactions,
-                main_account_id=owners.get(eid, ""),
             )
             any_ok = any_ok or ok
             if not ok:
@@ -879,9 +880,6 @@ class Schedule2Runner:
         chat_refs: List[str],
         account_id: str,
         content: str,
-        *,
-        want_reactions: bool = False,
-        main_account_id: str = "",
     ) -> bool:
         account_id = (account_id or "").strip()
         self.refresh_accounts()
@@ -907,27 +905,10 @@ class Schedule2Runner:
         async with lock:
             try:
                 ok = False
-                enabled_ids = {aid for aid, a in self._accounts.items() if a.enabled}
                 for cref in chat_refs:
                     await mark_watch_read_before_send(client, account_id, cref, self._read_tracker)
-                    sent_ok, meta = await send_text_to_chat(client, cref, content)
-                    if sent_ok:
+                    if await send_text_to_chat(client, cref, content):
                         ok = True
-                    if want_reactions and meta is not None:
-                        from schedule_reactions import schedule_whatsapp_reactions
-
-                        n_rx = schedule_whatsapp_reactions(
-                            shared_clients=shared,
-                            account_locks=self._account_locks,
-                            chat_jid=meta.chat_jid,
-                            message_id=meta.message_id,
-                            target_sender_jid=meta.sender_jid,
-                            sender_account_id=account_id,
-                            main_account_id=main_account_id,
-                            enabled_account_ids=enabled_ids,
-                        )
-                        if n_rx:
-                            info(f"定时任务点赞：群={cref} 已排程={n_rx}（各账号 1–10 分钟后）")
                 return ok
             except Exception as exc:
                 error(f"定时任务发送异常：账号={account_id} 错误={exc}")

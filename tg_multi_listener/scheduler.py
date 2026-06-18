@@ -451,10 +451,13 @@ def advance_scheduled_folder_day(job: ScheduledJob, cfg: AppConfig) -> tuple[boo
     if not can_advance_folder_day(job):
         return False, "已是最后一天或不是文件夹任务"
     next_index = int(job.folder_day_index) + 1
-    rel = job.folder_files[next_index]
+    from schedule_folder import resolve_folder_day_filename
+
+    rel = resolve_folder_day_filename(job.folder_path, job.folder_files[next_index])
     ok, err = _reload_folder_day_items_tg(job, cfg, rel)
     if not ok:
         return False, err
+    job.folder_files[next_index] = rel
     job.folder_day_index = next_index
     job.cursor = 0
     job.enabled = True

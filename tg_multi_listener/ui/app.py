@@ -26,10 +26,12 @@ from schedule_folder import (
     entry_schedule_kind_hint,
     format_bulk_delete_confirm_message,
     format_folder_advance_line,
+    format_folder_last_day_delete_line,
     folder_txt_abs_path,
     is_folder_job,
     schedule_kind_badge,
     scan_schedule_folder,
+    split_folder_jobs_for_bulk_advance,
     taskmgr_job_file_label,
 )
 from wa_ui.log_textbox_util import (
@@ -151,6 +153,7 @@ class MainWindow(ctk.CTkFrame):
         self._taskmgr_display_ids: List[str] = []
         self._taskmgr_fp_cache: Dict[str, tuple] = {}
         self._taskmgr_toggle_busy = False
+        self._manual_folder_advance_mode = False
         self._sched_target_rows: List[Tuple[AddressEntry, ctk.BooleanVar]] = []
         self._grp_row_widgets: Dict[str, Dict[str, Any]] = {}
         self._grp_row_ids: List[str] = []
@@ -1875,6 +1878,15 @@ class MainWindow(ctk.CTkFrame):
             height=38,
             command=self._start_next_folder_day,
         ).pack(fill="x", pady=(0, 10))
+        self._btn_manual_folder_day = ctk.CTkButton(
+            wrap,
+            text="手动下一天",
+            fg_color="#2a4a5a",
+            hover_color="#356878",
+            height=38,
+            command=self._toggle_manual_folder_advance_mode,
+        )
+        self._btn_manual_folder_day.pack(fill="x", pady=(0, 10))
         ctk.CTkButton(
             wrap,
             text="一键删除全部任务",
@@ -1922,7 +1934,10 @@ class MainWindow(ctk.CTkFrame):
             return
 
         def on_click(_event: Any = None) -> None:
-            self._toggle_job_run_by_id(job_id)
+            if self._manual_folder_advance_mode:
+                self._manual_advance_folder_day_by_id(job_id)
+            else:
+                self._toggle_job_run_by_id(job_id)
 
         widget.bind("<Button-1>", on_click)
         for child in widget.winfo_children():
@@ -1989,6 +2004,12 @@ class MainWindow(ctk.CTkFrame):
             text_color=rem_c if rem else "#5c4a00",
         )
         hint = "点击暂停" if running else ("点击继续" if j.enabled else "点击重新开始")
+        if self._manual_folder_advance_mode and is_folder_job(j):
+            hint = (
+                "点击切换下一天"
+                if can_advance_folder_day(j)
+                else "已是最后一天（一键下一天可删）"
+            )
         w["hint"].configure(text=hint, text_color=pal["hint"])
 
     def _build_taskmgr_tile(self, j: ScheduledJob, index: int) -> Dict[str, Any]:
@@ -2564,18 +2585,72 @@ class MainWindow(ctk.CTkFrame):
         self._clear_sched_target_selection()
         self._refresh_schedule_target_checks()
 
+    def _sync_manual_folder_advance_btn(self) -> None:
+        btn = getattr(self, "_btn_manual_folder_day", None)
+        if btn is None:
+            return
+        if self._manual_folder_advance_mode:
+            btn.configure(text="取消手动下一天", fg_color="#6a3a12", hover_color="#7d4518")
+        else:
+            btn.configure(text="手动下一天", fg_color="#2a4a5a", hover_color="#356878")
+
+    def _toggle_manual_folder_advance_mode(self) -> None:
+        self._manual_folder_advance_mode = not self._manual_folder_advance_mode
+        self._sync_manual_folder_advance_btn()
+        self._render_taskmgr_cards(force=False)
+        if self._manual_folder_advance_mode:
+            info("手动下一天：请点击要切换的文件夹任务卡片")
+        else:
+            info("已退出手动下一天模式")
+
+    def _manual_advance_folder_day_by_id(self, job_id: str) -> None:
+        if self._taskmgr_toggle_busy:
+            return
+        j = next((x for x in load_jobs() if x.id == job_id), None)
+        if j is None:
+            return
+        if not is_folder_job(j):
+            messagebox.showinfo("手动下一天", "仅文件夹任务可手动切换下一天。", parent=self)
+            return
+        if not can_advance_folder_day(j):
+            messagebox.showinfo(
+                "手动下一天",
+                "该任务已是最后一天，无下一天可切换。\n"
+                "可点「一键开始下一天」自动删除此类卡片。",
+                parent=self,
+            )
+            return
+        nxt = j.folder_day_index + 1
+        msg = (
+            f"将中断当前天未发完的内容。\n\n"
+            f"目标：{self._job_target_short(j)}\n"
+            f"{j.source_name or '未命名'} → {j.folder_files[nxt]}\n"
+            f"（第 {nxt + 1}/{len(j.folder_files)} 天）\n\n确定继续？"
+        )
+        if not messagebox.askyesno("手动下一天", msg, parent=self):
+            return
+        self._cfg = load_config()
+        ok, err = advance_scheduled_folder_day(j, self._cfg)
+        if not ok:
+            info(f"切换失败：{err}")
+            return
+        save_jobs_patch([j])
+        apply_last_schedule_for_jobs(self._cfg, [j])
+        self._render_taskmgr_cards(force=True)
+        info(f"已切换：{self._job_target_short(j)} → 第 {j.folder_day_index + 1} 天")
+
     def _start_next_folder_day(self) -> None:
         jobs = load_jobs()
-        candidates = [j for j in jobs if can_advance_folder_day(j)]
-        if not candidates:
+        candidates, stale = split_folder_jobs_for_bulk_advance(jobs)
+        if not candidates and not stale:
             try:
                 messagebox.showinfo(
                     "一键开始下一天",
-                    "没有可进入下一天的文件夹任务（需为文件夹任务且尚未到最后一份 TXT）。",
+                    "没有文件夹任务可处理（需为文件夹任务）。",
                     parent=self,
                 )
             except Exception:
-                info("没有可进入下一天的文件夹任务。")
+                info("没有可处理的文件夹任务。")
             return
 
         lines: List[str] = []
@@ -2594,11 +2669,30 @@ class MainWindow(ctk.CTkFrame):
             if self._doc_job_is_running(j):
                 running_n += 1
 
-        msg = "将中断当前天未发完的内容。\n\n"
-        if running_n:
-            msg += f"其中 {running_n} 个任务正在运行，切换后会立即停止当前天。\n\n"
-        msg += "将为以下文件夹任务切换到下一天并开始发送：\n"
-        msg += "\n".join(lines)
+        del_lines: List[str] = []
+        for j in stale:
+            idx = max(0, int(j.folder_day_index))
+            del_lines.append(
+                format_folder_last_day_delete_line(
+                    target_label=self._job_target_short(j),
+                    current_name=j.source_name or "未命名",
+                    day_one_based=idx + 1,
+                    total_days=len(j.folder_files),
+                )
+            )
+
+        msg = ""
+        if candidates:
+            msg += "将中断当前天未发完的内容。\n\n"
+            if running_n:
+                msg += f"其中 {running_n} 个任务正在运行，切换后会立即停止当前天。\n\n"
+            msg += "将为以下文件夹任务切换到下一天并开始发送：\n"
+            msg += "\n".join(lines)
+        if stale:
+            if msg:
+                msg += "\n\n"
+            msg += "以下任务已是最后一天，将删除卡片：\n"
+            msg += "\n".join(del_lines)
         msg += "\n\n确定继续？"
         try:
             if not messagebox.askyesno("一键开始下一天", msg, parent=self):
@@ -2617,13 +2711,29 @@ class MainWindow(ctk.CTkFrame):
                 updated.append(live)
             else:
                 info(f"任务 {self._job_target_short(live)} 切换失败：{err}")
-        if not updated:
-            info("未能切换任何文件夹任务。")
+
+        stale_ids = {j.id for j in stale}
+        if stale_ids:
+            kept = [x for x in load_jobs() if x.id not in stale_ids]
+            save_jobs(kept)
+            if self._sched_edit_job_id in stale_ids:
+                self._sched_edit_job_id = None
+
+        if updated:
+            save_jobs_patch(updated)
+            apply_last_schedule_for_jobs(self._cfg, updated)
+
+        if not updated and not stale_ids:
+            info("未能切换或删除任何文件夹任务。")
             return
-        save_jobs_patch(updated)
-        apply_last_schedule_for_jobs(self._cfg, updated)
+
         self._render_taskmgr_cards(force=True)
-        info(f"已为 {len(updated)} 个文件夹任务切换到下一天并开始发送。")
+        parts: List[str] = []
+        if updated:
+            parts.append(f"已切换 {len(updated)} 个任务到下一天")
+        if stale_ids:
+            parts.append(f"已删除 {len(stale_ids)} 个无下一天的任务")
+        info("；".join(parts) + "。")
 
     def _sched_job_fingerprint(self, j: ScheduledJob) -> tuple:
         stotal, sdone, sremain = j.send_progress()
