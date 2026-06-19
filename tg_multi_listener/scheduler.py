@@ -401,6 +401,11 @@ def save_jobs_patch(updated: List[ScheduledJob]) -> None:
     by_id = {j.id: j for j in fresh}
     order = [j.id for j in fresh]
     for j in updated:
+        existing = by_id.get(j.id)
+        if existing is not None:
+            from schedule_folder import merge_folder_job_patch
+
+            j = merge_folder_job_patch(existing, j)
         by_id[j.id] = j
         if j.id not in order:
             order.append(j.id)
@@ -1045,7 +1050,10 @@ class ScheduleRunner:
                                 enabled_account_ids=enabled_ids,
                             )
                             if n_rx:
-                                info(f"文档任务点赞：任务={job_id} 群={cref} 已排程={n_rx}（各账号 1–10 分钟后）")
+                                info(
+                                    f"[TG] 文档任务点赞：任务={job_id} 群={cref} "
+                                    f"已排程={n_rx}（各账号 1–10 分钟后）"
+                                )
                     except Exception as exc:
                         hint = ""
                         if "Could not find the input entity" in str(exc) or "PeerChannel" in str(exc):

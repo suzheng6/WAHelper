@@ -11,6 +11,9 @@ _FOLDER_TXT_NUM = re.compile(r"^(\d+)")
 # 「一键开始下一天」后各任务独立随机延迟，避免同时发送
 FOLDER_ADVANCE_DELAY_MIN_SEC = 10.0
 FOLDER_ADVANCE_DELAY_MAX_SEC = 60.0
+# 一键下一天：每批处理任务数及批间暂停（秒），减轻并发与写入竞态
+FOLDER_BULK_ADVANCE_BATCH_SIZE = 10
+FOLDER_BULK_ADVANCE_BATCH_PAUSE_SEC = 3.0
 
 
 def random_folder_advance_delay_seconds() -> float:
@@ -109,6 +112,24 @@ def can_advance_folder_day(job: Any) -> bool:
         return False
     idx = int(getattr(job, "folder_day_index", 0) or 0)
     return idx < total - 1
+
+
+def merge_folder_job_patch(existing: Any, patch: Any) -> Any:
+    """合并任务补丁：防止后台调度用旧 folder_day_index 覆盖 UI 刚切换的天数。"""
+    if not is_folder_job(existing):
+        return patch
+    ex_idx = int(getattr(existing, "folder_day_index", 0) or 0)
+    pt_idx = int(getattr(patch, "folder_day_index", 0) or 0)
+    if pt_idx < ex_idx:
+        patch.folder_day_index = ex_idx
+        patch.folder_files = list(getattr(existing, "folder_files", None) or [])
+        patch.source_name = getattr(existing, "source_name", "")
+        patch.source_path = getattr(existing, "source_path", "")
+        if hasattr(existing, "items"):
+            patch.items = existing.items
+        if hasattr(existing, "rows"):
+            patch.rows = existing.rows
+    return patch
 
 
 def split_folder_jobs_for_bulk_advance(jobs: List[Any]) -> Tuple[List[Any], List[Any]]:

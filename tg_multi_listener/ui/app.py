@@ -21,6 +21,8 @@ from wa_ui.taskmgr_tile_theme import (
     taskmgr_tile_palette,
 )
 from schedule_folder import (
+    FOLDER_BULK_ADVANCE_BATCH_PAUSE_SEC,
+    FOLDER_BULK_ADVANCE_BATCH_SIZE,
     bulk_delete_job_summary,
     can_advance_folder_day,
     entry_schedule_kind_hint,
@@ -2686,7 +2688,10 @@ class MainWindow(ctk.CTkFrame):
             msg += "将中断当前天未发完的内容。\n\n"
             if running_n:
                 msg += f"其中 {running_n} 个任务正在运行，切换后会立即停止当前天。\n\n"
-            msg += "将为以下文件夹任务切换到下一天并开始发送：\n"
+            msg += (
+                f"将为以下文件夹任务切换到下一天并开始发送"
+                f"（每批 {FOLDER_BULK_ADVANCE_BATCH_SIZE} 个，批间暂停 {int(FOLDER_BULK_ADVANCE_BATCH_PAUSE_SEC)} 秒）：\n"
+            )
             msg += "\n".join(lines)
         if stale:
             if msg:
@@ -2701,36 +2706,79 @@ class MainWindow(ctk.CTkFrame):
             return
 
         self._cfg = load_config()
-        updated: List[ScheduledJob] = []
-        for j in candidates:
-            live = next((x for x in load_jobs() if x.id == j.id), None)
+        self._bulk_folder_advance_ids = [j.id for j in candidates]
+        self._bulk_folder_advance_stale_ids = {j.id for j in stale}
+        self._bulk_folder_advance_done = 0
+        self._bulk_folder_advance_failed = 0
+        total = len(self._bulk_folder_advance_ids)
+        if total:
+            info(f"一键下一天：共 {total} 个任务，每批 {FOLDER_BULK_ADVANCE_BATCH_SIZE} 个…")
+        self._run_bulk_folder_advance_batch()
+
+    def _run_bulk_folder_advance_batch(self) -> None:
+        ids = getattr(self, "_bulk_folder_advance_ids", None) or []
+        if not ids:
+            self._finish_bulk_folder_advance()
+            return
+
+        batch_ids = ids[:FOLDER_BULK_ADVANCE_BATCH_SIZE]
+        self._bulk_folder_advance_ids = ids[FOLDER_BULK_ADVANCE_BATCH_SIZE:]
+        batch_updated: List[ScheduledJob] = []
+
+        for job_id in batch_ids:
+            live = next((x for x in load_jobs() if x.id == job_id), None)
             if live is None or not can_advance_folder_day(live):
                 continue
             ok, err = advance_scheduled_folder_day(live, self._cfg)
             if ok:
-                updated.append(live)
+                save_jobs_patch([live])
+                batch_updated.append(live)
+                self._bulk_folder_advance_done += 1
             else:
+                self._bulk_folder_advance_failed += 1
                 info(f"任务 {self._job_target_short(live)} 切换失败：{err}")
 
-        stale_ids = {j.id for j in stale}
+        if batch_updated:
+            apply_last_schedule_for_jobs(self._cfg, batch_updated)
+            self._render_taskmgr_cards(force=True)
+
+        remaining = len(self._bulk_folder_advance_ids)
+        if remaining:
+            info(
+                f"本批已切换 {len(batch_updated)} 个，"
+                f"累计 {self._bulk_folder_advance_done} 个，剩余 {remaining} 个…"
+            )
+            self.after(
+                int(FOLDER_BULK_ADVANCE_BATCH_PAUSE_SEC * 1000),
+                self._run_bulk_folder_advance_batch,
+            )
+            return
+        self._finish_bulk_folder_advance()
+
+    def _finish_bulk_folder_advance(self) -> None:
+        stale_ids = getattr(self, "_bulk_folder_advance_stale_ids", None) or set()
+        done = int(getattr(self, "_bulk_folder_advance_done", 0) or 0)
+        failed = int(getattr(self, "_bulk_folder_advance_failed", 0) or 0)
+
         if stale_ids:
             kept = [x for x in load_jobs() if x.id not in stale_ids]
             save_jobs(kept)
             if self._sched_edit_job_id in stale_ids:
                 self._sched_edit_job_id = None
 
-        if updated:
-            save_jobs_patch(updated)
-            apply_last_schedule_for_jobs(self._cfg, updated)
+        self._bulk_folder_advance_ids = []
+        self._bulk_folder_advance_stale_ids = set()
 
-        if not updated and not stale_ids:
+        if done == 0 and failed == 0 and not stale_ids:
             info("未能切换或删除任何文件夹任务。")
             return
 
         self._render_taskmgr_cards(force=True)
         parts: List[str] = []
-        if updated:
-            parts.append(f"已切换 {len(updated)} 个任务到下一天")
+        if done:
+            parts.append(f"已切换 {done} 个任务到下一天")
+        if failed:
+            parts.append(f"{failed} 个切换失败")
         if stale_ids:
             parts.append(f"已删除 {len(stale_ids)} 个无下一天的任务")
         info("；".join(parts) + "。")

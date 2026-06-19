@@ -225,6 +225,11 @@ def save_schedule2_jobs_patch(updated: List[Schedule2Job]) -> None:
     by_id = {j.id: j for j in fresh}
     order = [j.id for j in fresh]
     for j in updated:
+        existing = by_id.get(j.id)
+        if existing is not None:
+            from schedule_folder import merge_folder_job_patch
+
+            j = merge_folder_job_patch(existing, j)
         by_id[j.id] = j
         if j.id not in order:
             order.append(j.id)
