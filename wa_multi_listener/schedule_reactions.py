@@ -5,7 +5,10 @@ import asyncio
 import random
 from typing import Any, Dict, List, Set, Tuple, Union
 
-from logger_util import debug, error, info, warning
+try:
+    from tg_multi_listener.logger_util import debug, error, info, warning
+except ImportError:
+    from logger_util import debug, error, info, warning
 
 REACTION_ROLE_LABELS: Tuple[str, ...] = ("女一", "女二", "男二", "主号")
 _HEART = "❤️"

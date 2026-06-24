@@ -8,6 +8,7 @@ import customtkinter as ctk
 
 TaskmgrBucket = str  # running | listen_pause | stage_listen_pause | stopped_listen_pause | other_pause | stopped
 
+STAGE_LISTEN_HIT_PAUSE_REASON = "阶段提醒后监听命中，自动暂停"
 STOPPED_LISTEN_HIT_PAUSE_REASON = "已停止任务监听命中，请关注"
 
 _TASKMGR_FONTS: dict[str, ctk.CTkFont] | None = None
@@ -115,8 +116,10 @@ def _is_stage_reminder_pause(pause_reason: str) -> bool:
 def compose_listen_pause_reason(previous_reason: str, listen_reason: str) -> str:
     """阶段提醒已暂停的任务再被监听命中时，使用组合原因以触发专用卡片色。"""
     prev = (previous_reason or "").strip()
+    if _is_stage_listen_pause(prev):
+        return prev or STAGE_LISTEN_HIT_PAUSE_REASON
     if "阶段提醒" in prev and "已自动暂停" in prev:
-        return "阶段提醒后监听命中，自动暂停"
+        return STAGE_LISTEN_HIT_PAUSE_REASON
     return (listen_reason or "").strip() or "监听命中目标用户，自动暂停"
 
 

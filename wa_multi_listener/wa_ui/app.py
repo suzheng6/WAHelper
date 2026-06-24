@@ -33,6 +33,7 @@ from config import (
 )
 from listener import ListenerController
 from logger_util import add_memory_listener, error, get_recent_lines, info, remove_memory_listener
+from wa_ui.log_view_filter import filter_lines_for_wa_log_view, is_visible_in_wa_log_view
 from notifier import AlertPopup, show_stage_reminder
 from stats import record_alert, today_alert_count
 from paths import app_root, resource_path
@@ -315,10 +316,15 @@ class WaPanel(ctk.CTkFrame):
         self.shutdown_ui()
 
     def _on_log_line(self, line: str) -> None:
+        if not is_visible_in_wa_log_view(line):
+            return
         try:
             self._log_queue.put_nowait(line)
         except Exception:
             pass
+
+    def _wa_log_lines(self, limit: int) -> List[str]:
+        return filter_lines_for_wa_log_view(get_recent_lines(limit))
 
     def _drain_log_queue_to_textbox(self) -> None:
         lb = getattr(self, "_log_box", None)
@@ -337,7 +343,7 @@ class WaPanel(ctk.CTkFrame):
             return
         reload_log_textbox_from_memory(
             lb,
-            get_recent_lines,
+            self._wa_log_lines,
             limit=LOG_TEXTBOX_MAX_LINES,
             max_lines=LOG_TEXTBOX_MAX_LINES,
             log_queue=getattr(self, "_log_queue", None),
@@ -2207,7 +2213,7 @@ class WaPanel(ctk.CTkFrame):
         bind_log_textbox_wheel(self._log_box)
         reload_log_textbox_from_memory(
             self._log_box,
-            get_recent_lines,
+            self._wa_log_lines,
             limit=LOG_TEXTBOX_MAX_LINES,
             log_queue=getattr(self, "_log_queue", None),
         )

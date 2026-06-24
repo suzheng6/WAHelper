@@ -592,7 +592,7 @@ class Schedule2Runner:
                 return False
             acc = resolve_send_account_id(row, "", owners, self._accounts)
             return await self._send_one_to_many(
-                targets, acc, row.content
+                targets, acc, row.content, want_reactions=row.want_reactions, main_account_id=""
             )
 
         if row_needs_per_group_owner([row]):
@@ -618,6 +618,8 @@ class Schedule2Runner:
                 [ent.chat_ref.strip()],
                 acc_send,
                 row.content,
+                want_reactions=row.want_reactions,
+                main_account_id=owners.get(eid, ""),
             )
             any_ok = any_ok or ok
             if not ok:
@@ -885,6 +887,9 @@ class Schedule2Runner:
         chat_refs: List[str],
         account_id: str,
         content: str,
+        *,
+        want_reactions: bool = False,
+        main_account_id: str = "",
     ) -> bool:
         account_id = (account_id or "").strip()
         self.refresh_accounts()
@@ -910,10 +915,29 @@ class Schedule2Runner:
         async with lock:
             try:
                 ok = False
+                enabled_ids = {aid for aid, a in self._accounts.items() if a.enabled}
                 for cref in chat_refs:
                     await mark_watch_read_before_send(client, account_id, cref, self._read_tracker)
-                    if await send_text_to_chat(client, cref, content):
+                    sent_ok, meta = await send_text_to_chat(client, cref, content)
+                    if sent_ok:
                         ok = True
+                    if want_reactions and meta is not None:
+                        from wa_reactions import schedule_whatsapp_reactions
+
+                        n_rx = schedule_whatsapp_reactions(
+                            shared_clients=shared,
+                            account_locks=self._account_locks,
+                            chat_jid=meta.chat_jid,
+                            message_id=meta.message_id,
+                            message_sender_jid=meta.message_sender_jid,
+                            sender_account_id=account_id,
+                            main_account_id=main_account_id,
+                            enabled_account_ids=enabled_ids,
+                        )
+                        if n_rx:
+                            info(
+                                f"[WA] 定时任务点赞：群={cref} 已排程={n_rx}（各账号 1–10 分钟后）"
+                            )
                 return ok
             except Exception as exc:
                 error(f"定时任务发送异常：账号={account_id} 错误={exc}")
