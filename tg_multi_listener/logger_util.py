@@ -9,7 +9,7 @@ from logging.handlers import RotatingFileHandler
 from threading import Lock
 from typing import Callable, Deque, List, Optional
 
-from .compat_config import LOGS_DIR, ensure_dirs
+from .config import ensure_dirs, logs_dir
 
 _memory: Deque[str] = deque(maxlen=250)
 _listeners: List[Callable[[str], None]] = []
@@ -21,7 +21,7 @@ DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 def setup_file_logging() -> logging.Logger:
     ensure_dirs()
-    log_path = os.path.join(LOGS_DIR, "app.log")
+    log_path = os.path.join(logs_dir(), "app.log")
     root = logging.getLogger("tg_multi_listener")
     root.setLevel(logging.DEBUG)
     root.handlers.clear()

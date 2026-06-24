@@ -27,7 +27,7 @@ from wa_ui.app import WaPanel
 from wa_ui.theme import COLORS
 
 MAIN_GEOMETRY = "1180x760"
-APP_VERSION = "v2.0.14"
+APP_VERSION = "v2.0.15"
 _AI_ROOT = _pkg_root.parent
 
 
@@ -242,6 +242,9 @@ class MessengerShell(ctk.CTk):
 
 
 def run_shell() -> MessengerShell:
+    from platform_paths import tg_data_root
+
+    os.environ.setdefault("TG_HELPER_DATA_ROOT", tg_data_root())
     bootstrap_wa_runtime()
     ensure_tg_data_ready()
     bootstrap_wa_logging()

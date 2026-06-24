@@ -5,10 +5,11 @@ import asyncio
 import random
 from typing import Any, Dict, List, Set, Tuple, Union
 
-try:
+
+def _tg_log():
     from tg_multi_listener.logger_util import debug, error, info, warning
-except ImportError:
-    from logger_util import debug, error, info, warning
+
+    return debug, error, info, warning
 
 REACTION_ROLE_LABELS: Tuple[str, ...] = ("女一", "女二", "男二", "主号")
 _HEART = "❤️"
@@ -102,12 +103,13 @@ async def _run_telegram_reaction_delayed(
     label: str,
     delay_sec: float,
 ) -> None:
+    _debug, _error, _info, _warning = _tg_log()
     emoji = reaction_emoji_for_role_label(label)
     try:
         await asyncio.sleep(delay_sec)
         client = shared_clients.get(acc_id)
         if client is None:
-            warning(f"[TG] 定时点赞跳过：账号 {acc_id} 未连接（延迟后）")
+            _warning(f"[TG] 定时点赞跳过：账号 {acc_id} 未连接（延迟后）")
             return
         lock = account_locks.get(acc_id)
         if lock is None:
@@ -115,15 +117,15 @@ async def _run_telegram_reaction_delayed(
             account_locks[acc_id] = lock
         async with lock:
             if not await client.is_user_authorized():
-                warning(f"[TG] 定时点赞跳过：账号 {acc_id} 未登录（延迟后）")
+                _warning(f"[TG] 定时点赞跳过：账号 {acc_id} 未登录（延迟后）")
                 return
             entity = await _resolve_telegram_entity_for_send(client, chat_ref)
             await telegram_react_once(client, entity, msg_id, emoji)
-        info(f"[TG] 定时点赞完成：账号={acc_id} 表情={emoji} 延迟={delay_sec / 60:.1f} 分钟")
+        _info(f"[TG] 定时点赞完成：账号={acc_id} 表情={emoji} 延迟={delay_sec / 60:.1f} 分钟")
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        error(f"[TG] 定时点赞失败：账号={acc_id} 表情={emoji} 错误={exc}")
+        _error(f"[TG] 定时点赞失败：账号={acc_id} 表情={emoji} 错误={exc}")
 
 
 def schedule_telegram_reactions(
@@ -137,18 +139,19 @@ def schedule_telegram_reactions(
     enabled_account_ids: Set[str],
 ) -> int:
     """为每条消息排程延迟点赞；立即返回，各账号独立随机 1–10 分钟后执行。"""
+    _debug, _error, _info, _warning = _tg_log()
     reactors = pick_reaction_accounts(
         sender_account_id=sender_account_id,
         main_account_id=main_account_id,
         available_account_ids=enabled_account_ids,
     )
     if not reactors:
-        debug("[TG] 定时点赞跳过：无可用点赞账号")
+        _debug("[TG] 定时点赞跳过：无可用点赞账号")
         return 0
     scheduled = 0
     for label, acc_id in reactors:
         if shared_clients.get(acc_id) is None:
-            warning(f"[TG] 定时点赞跳过：账号 {acc_id} 未连接")
+            _warning(f"[TG] 定时点赞跳过：账号 {acc_id} 未连接")
             continue
         delay_sec = reaction_delay_seconds()
         task = asyncio.create_task(
@@ -164,7 +167,7 @@ def schedule_telegram_reactions(
         )
         _track_reaction_task(task)
         scheduled += 1
-        info(
+        _info(
             f"[TG] 定时点赞已排程：账号={acc_id} 表情={reaction_emoji_for_role_label(label)} "
             f"约 {delay_sec / 60:.1f} 分钟后"
         )

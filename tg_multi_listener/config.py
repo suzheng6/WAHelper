@@ -12,15 +12,55 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from .paths import app_root, resource_path
 
-# 数据目录：整合版在 telegram/；独立运行仍在 exe 旁
-BASE_DIR = os.environ.get("TG_HELPER_DATA_ROOT", "").strip() or app_root()
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+# 数据目录：整合版在 telegram/；独立运行仍在 exe 旁（须通过 get_base_dir() 读取，勿缓存为模块常量）
 CONFIG_EXAMPLE_NAME = "config.example.json"
-SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
-LOGS_DIR = os.path.join(BASE_DIR, "logs")
-DATA_DIR = os.path.join(BASE_DIR, "data")
-SCHEDULE_FILE = os.path.join(DATA_DIR, "schedules.json")
-SCHEDULE2_FILE = os.path.join(DATA_DIR, "schedule2.json")
+
+
+def get_base_dir() -> str:
+    return os.environ.get("TG_HELPER_DATA_ROOT", "").strip() or app_root()
+
+
+def config_path() -> str:
+    return os.path.join(get_base_dir(), "config.json")
+
+
+def sessions_dir() -> str:
+    return os.path.join(get_base_dir(), "sessions")
+
+
+def logs_dir() -> str:
+    return os.path.join(get_base_dir(), "logs")
+
+
+def data_dir() -> str:
+    return os.path.join(get_base_dir(), "data")
+
+
+def schedule_file() -> str:
+    return os.path.join(data_dir(), "schedules.json")
+
+
+def schedule2_file() -> str:
+    return os.path.join(data_dir(), "schedule2.json")
+
+
+def __getattr__(name: str) -> str:
+    """兼容 `from config import CONFIG_PATH`；每次访问按当前 TG_HELPER_DATA_ROOT 解析。"""
+    if name == "BASE_DIR":
+        return get_base_dir()
+    if name == "CONFIG_PATH":
+        return config_path()
+    if name == "SESSIONS_DIR":
+        return sessions_dir()
+    if name == "LOGS_DIR":
+        return logs_dir()
+    if name == "DATA_DIR":
+        return data_dir()
+    if name == "SCHEDULE_FILE":
+        return schedule_file()
+    if name == "SCHEDULE2_FILE":
+        return schedule2_file()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 _lock = threading.RLock()
 
@@ -30,23 +70,25 @@ ChatRef = Union[int, str]
 
 
 def ensure_dirs() -> None:
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
-    os.makedirs(LOGS_DIR, exist_ok=True)
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(sessions_dir(), exist_ok=True)
+    os.makedirs(logs_dir(), exist_ok=True)
+    os.makedirs(data_dir(), exist_ok=True)
 
 
 def ensure_first_run_config() -> None:
     """首次运行：若无 config.json，从示例复制到程序旁（便于用户直接改）。"""
-    if os.path.isfile(CONFIG_PATH):
+    path = config_path()
+    if os.path.isfile(path):
         return
+    base = get_base_dir()
     candidates = [
-        os.path.join(BASE_DIR, CONFIG_EXAMPLE_NAME),
+        os.path.join(base, CONFIG_EXAMPLE_NAME),
         resource_path(CONFIG_EXAMPLE_NAME),
     ]
     for src in candidates:
         if os.path.isfile(src):
             try:
-                shutil.copyfile(src, CONFIG_PATH)
+                shutil.copyfile(src, path)
                 return
             except OSError:
                 continue
@@ -368,7 +410,7 @@ class Account:
 
     def session_path(self) -> str:
         ensure_dirs()
-        return os.path.join(SESSIONS_DIR, f"{self.session_name}.session")
+        return os.path.join(sessions_dir(), f"{self.session_name}.session")
 
 
 @dataclass
@@ -415,10 +457,10 @@ def _address_entry_from_dict(d: Dict[str, Any]) -> Optional[AddressEntry]:
 def _last_schedule_names_on_disk() -> Dict[str, str]:
     """读取 config.json 中各通讯录条目的 last_schedule_source_name（含空字符串）。"""
     with _lock:
-        if not os.path.isfile(CONFIG_PATH):
+        if not os.path.isfile(config_path()):
             return {}
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(config_path(), "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (json.JSONDecodeError, OSError):
             return {}
@@ -540,10 +582,10 @@ def _account_from_dict(d: Dict[str, Any]) -> Account:
 def load_config() -> AppConfig:
     ensure_dirs()
     with _lock:
-        if not os.path.isfile(CONFIG_PATH):
+        if not os.path.isfile(config_path()):
             return default_config()
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            with open(config_path(), "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except (json.JSONDecodeError, OSError):
             return default_config()
@@ -624,8 +666,9 @@ def save_config(cfg: AppConfig) -> None:
         "rate_limit_seconds": cfg.rate_limit_seconds,
         "listening_enabled": cfg.listening_enabled,
     }
-    tmp = CONFIG_PATH + ".tmp"
+    path = config_path()
+    tmp = path + ".tmp"
     with _lock:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, CONFIG_PATH)
+        os.replace(tmp, path)

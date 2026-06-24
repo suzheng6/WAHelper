@@ -4,12 +4,18 @@ from __future__ import annotations
 import os
 import traceback
 
-from config import LOGS_DIR, ensure_dirs
+from platform_paths import tg_data_root
 from startup_bootstrap import bootstrap_wa_logging, bootstrap_wa_runtime
+
+
+def _prime_tg_data_root() -> None:
+    """须在导入会牵连 tg_multi_listener.config 的模块之前设置。"""
+    os.environ.setdefault("TG_HELPER_DATA_ROOT", tg_data_root())
 
 
 def main() -> None:
     bootstrap_wa_runtime()
+    _prime_tg_data_root()
     bootstrap_wa_logging()
 
     from wa_ui.shell import run_shell
@@ -45,8 +51,10 @@ if __name__ == "__main__":
         pass
     except Exception:
         try:
+            from config import ensure_dirs, logs_dir
+
             ensure_dirs()
-            with open(os.path.join(LOGS_DIR, "startup_error.log"), "a", encoding="utf-8") as f:
+            with open(os.path.join(logs_dir(), "startup_error.log"), "a", encoding="utf-8") as f:
                 f.write("\n---\n")
                 traceback.print_exc(file=f)
         except OSError:

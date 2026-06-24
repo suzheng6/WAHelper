@@ -96,6 +96,51 @@ def resolve_legacy_tg_dir(user_path: str) -> Optional[str]:
     return None
 
 
+def _has_session_files(root: str) -> bool:
+    sess = os.path.join(root, _SESSIONS_DIRNAME)
+    if not os.path.isdir(sess):
+        return False
+    try:
+        return any(n.endswith(".session") for n in os.listdir(sess))
+    except OSError:
+        return False
+
+
+def _config_looks_empty(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return True
+    if data.get("api_id") and str(data.get("api_hash") or "").strip():
+        return False
+    if data.get("accounts"):
+        return False
+    if data.get("address_book"):
+        return False
+    return True
+
+
+def _try_restore_config_from_backup(cfg_path: str) -> bool:
+    root = os.path.dirname(cfg_path)
+    try:
+        names = sorted(
+            [n for n in os.listdir(root) if n.startswith("config.json.bak_")],
+            reverse=True,
+        )
+    except OSError:
+        return False
+    for name in names:
+        src = os.path.join(root, name)
+        data = _read_json(src)
+        if _config_looks_empty(data):
+            continue
+        try:
+            shutil.copy2(src, cfg_path)
+            info(f"已从备份恢复 Telegram 配置：{name}")
+            return True
+        except OSError as exc:
+            warning(f"恢复 Telegram 配置失败 {name}：{exc}")
+    return False
+
+
 def ensure_tg_data_ready() -> str:
     """新用户：创建 telegram/ 目录，并在无 config.json 时写入示例配置（可正常添加账号登录）。"""
     root = tg_data_root()
@@ -105,6 +150,17 @@ def ensure_tg_data_ready() -> str:
     os.makedirs(os.path.join(root, "data"), exist_ok=True)
 
     cfg_path = os.path.join(root, _CONFIG_NAME)
+    if os.path.isfile(cfg_path):
+        existing = _read_json(cfg_path)
+        if isinstance(existing, dict) and not _config_looks_empty(existing):
+            return root
+        if _has_session_files(root) and _try_restore_config_from_backup(cfg_path):
+            return root
+        return root
+
+    if _has_session_files(root) and _try_restore_config_from_backup(cfg_path):
+        return root
+
     if os.path.isfile(cfg_path):
         return root
 
